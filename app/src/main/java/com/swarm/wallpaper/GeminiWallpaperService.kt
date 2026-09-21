@@ -7,6 +7,10 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
@@ -15,51 +19,60 @@ import android.opengl.EGLSurface
 import android.opengl.GLES20
 import android.opengl.GLUtils
 import android.opengl.Matrix
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.service.wallpaper.WallpaperService
+import android.view.Choreographer
 import android.view.MotionEvent
-import android.view.VelocityTracker
-import android.view.ViewConfiguration
 import android.view.SurfaceHolder
+import android.view.ViewConfiguration
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
-import kotlin.math.exp
 import kotlin.math.abs
+import kotlin.math.acos
 import kotlin.math.atan2
+import kotlin.math.exp
+import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.round
 import kotlin.math.sqrt
 import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val G_PARTICLES = 80000     // số hạt, khớp gem80k.html
-private const val G_FPS = 30              // fps bình thường
-private const val G_FPS_INTERACTION = 60  // 60fps khi vuốt / quán tính / launcher đang scroll
-private const val G_FPS_SAVER = 15        // fps khi bật Tiết kiệm pin (khi không tương tác)
-private const val G_AUTO_WAVE_MS = 0L  // tự bắn sóng đổi màu mỗi N ms (0 = tắt, chỉ chạm mới đổi)
+private const val G_PARTICLES = 20000     // số hạt (tụt fps thì giảm xuống 14000~16000)
+private const val G_FPS = 60              // fps bình thường (bám vsync)
+private const val G_FPS_SAVER = 30        // fps khi bật Tiết kiệm pin
+private const val G_AUTO_WAVE_MS = 8000L  // tự bắn sóng đổi màu mỗi N ms (0 = tắt, chỉ chạm mới đổi)
 private const val G_SPARK_N = 0.7f        // độ "nhọn" của hình sparkle
-private const val G_SIZE_BOOST = 1.0f     // nhân kích thước ký tự cho dễ nhìn trên màn hình nhỏ
+private const val G_SIZE_BOOST = 1.6f     // nhân kích thước ký tự cho dễ nhìn trên màn hình nhỏ
 private const val G_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
 
-// Chuyển động: tinh chỉnh nhẹ cho Xperia XZ3 / Snapdragon 845 / màn 2K.
-private const val G_TILT_MAX_DEG = 18f          // giới hạn góc parallax do nghiêng máy
-private const val G_TILT_GAIN = 0.72f           // độ bám theo trọng lực (đối trọng)
-private const val G_TILT_SMOOTH_HZ = 5.0f       // low-pass; thấp hơn = mềm hơn
-private const val G_DRAG_DEG_PER_SCREEN = 150f  // vuốt hết bề ngang ~= 150 độ
-private const val G_INERTIA_FRICTION = 3.6f     // hãm quán tính (1/s)
-private const val G_INERTIA_STOP_DPS = 2.0f     // dưới ngưỡng này coi như dừng
-private const val G_AUTO_DELAY_MS = 1100L       // giữ yên bao lâu mới bắt đầu auto rotate
-private const val G_AUTO_YAW_DPS = 4.2f         // tự xoay rất nhẹ khi máy đứng yên
-private const val G_STILL_TILT_EPS_DEG = 0.18f  // biến thiên tilt nhỏ hơn mức này = gần như yên
+// ── nghiêng máy (cảm biến trọng lực/gia tốc) ──
+private const val G_TILT_GAIN = 0.7f          // hình xoay = 0.7 × góc nghiêng thật
+private const val G_TILT_MAX_DEG = 30f        // giới hạn góc xoay do nghiêng
+private const val G_TILT_SIGN_X = 1f          // ngược chiều thì đổi thành -1f
+private const val G_TILT_SIGN_Y = 1f          // ngược chiều thì đổi thành -1f
+private const val G_TILT_RECENTER_S = 3f      // tư thế đang cầm = thẳng, tự căn giữa sau ~3s
+private const val G_TILT_SMOOTH_S = 0.12f     // càng lớn càng trôi mượt (nhưng trễ)
+private const val G_SENSOR_LP_S = 0.05f       // lọc nhiễu cảm biến
+
+// ── vuốt xoay ──
+private const val G_DRAG_DEG_PER_PX = 0.25f   // 1px vuốt = 0.25 độ
+private const val G_TOUCH_SMOOTH_S = 0.04f    // làm mượt theo ngón tay
+private const val G_FLING_DECAY = 1.8f        // quán tính: càng lớn càng dừng nhanh
+private const val G_FLING_MAX = 900f          // độ/giây tối đa khi thả tay
+private const val G_MAX_PITCH_DEG = 70f       // giới hạn vuốt lên/xuống
+private const val G_OFFSET_DEG = 240f         // vuốt chuyển trang home: 1 màn = 240 độ
+
+// ── tự xoay khi giữ yên ──
+private const val G_IDLE_MS = 3000L           // yên 3s thì tự xoay lại
+private const val G_MOVE_THRESHOLD = 6f       // độ/giây: nghiêng nhanh hơn mức này = đang tương tác
+private const val G_AUTO_FADE_IN_S = 1.0f     // tự xoay hiện dần
+private const val G_AUTO_FADE_OUT_S = 0.15f   // ngừng tự xoay nhanh khi có tương tác
+private const val G_MANUAL_RETURN_S = 6f      // góc vuốt về dần khi rảnh (0 = giữ nguyên)
 
 private class GWave(var radius: Float, val state: Int)
 
@@ -125,11 +138,10 @@ precision mediump float;
 varying vec3 vColor;
 varying float vSym;
 uniform sampler2D uTex;
-uniform float uSymCount;
 
 void main() {
     vec2 uv = gl_PointCoord;
-    uv.x = (uv.x + vSym) / uSymCount;
+    uv.x = (uv.x + vSym) / 16.0;
     vec4 t = texture2D(uTex, uv);
     if (t.a < 0.1) discard;
     gl_FragColor = vec4(vColor, t.a);
@@ -142,13 +154,11 @@ class GeminiWallpaperService : WallpaperService() {
     override fun onCreateEngine(): Engine = GemEngine()
 
     private inner class GemEngine : Engine() {
-        private val handler = Handler(Looper.getMainLooper())
+        private val choreographer = Choreographer.getInstance()
         private val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        private val pixelRatio = resources.displayMetrics.density.coerceAtMost(2f)
-        private val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        private val gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
-            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        private val touchSlop = ViewConfiguration.get(this@GeminiWallpaperService).scaledTouchSlop.toFloat()
+        private val sm = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        private val pixelRatio = resources.displayMetrics.density
+        private val touchSlop = ViewConfiguration.get(this@GeminiWallpaperService).scaledTouchSlop
 
         private var shown = false
         private var glReady = false
@@ -171,8 +181,6 @@ class GeminiWallpaperService : WallpaperService() {
         private var locCore = 0
         private var locAccent = 0
         private var locTex = 0
-        private var locSymCount = 0
-        private var symbolCount = 1
 
         private var w = 0
         private var h = 0
@@ -180,8 +188,8 @@ class GeminiWallpaperService : WallpaperService() {
         private val proj = FloatArray(16)
         private val mv = FloatArray(16)
 
-        private var startAt = 0L
-        private var lastT = 0L
+        private var startAt = 0L      // ms (uptime)
+        private var lastNs = 0L       // ns (nanoTime)
         private var animTime = 0f
         private var morph = (-PI / 2).toFloat()
         private var stateIndex = 0
@@ -191,95 +199,60 @@ class GeminiWallpaperService : WallpaperService() {
         private val coreArr = FloatArray(12)
         private val accentArr = FloatArray(12)
 
-        // ── tương tác / cảm biến ──
-        private var sensorRegistered = false
-        private val gravity = FloatArray(3)
-        private var haveGravity = false
-        private var lastSensorNs = 0L
-        private var tiltPitch = 0f
-        private var tiltRoll = 0f
-        private var targetPitch = 0f
-        private var targetRoll = 0f
-        private var lastRawPitch = 0f
-        private var lastRawRoll = 0f
-        private var lastMotionAt = 0L
-
-        private var touching = false
-        private var downX = 0f
-        private var downY = 0f
-        private var lastTouchX = 0f
-        private var lastTouchY = 0f
-        private var dragDistance = 0f
-        // Hướng xoay do người dùng được tích lũy trực tiếp bằng ma trận 3D.
-        // Không còn clamp pitch ±75° nên có thể xoay xuyên qua các cực / lật tự do.
-        private val userRotation = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
-        private val rotTmp = FloatArray(16)
-        private var yawVel = 0f
-        private var pitchVel = 0f
-        private var velocityTracker: VelocityTracker? = null
-
-        private var lastOffsetX = -1f
-        private var lastOffsetAt = 0L
-        private var offsetYaw = 0f
+        // ── cảm biến nghiêng ──
+        private val gravSensor: Sensor? =
+            sm.getDefaultSensor(Sensor.TYPE_GRAVITY) ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        private var rawGx = 0f
+        private var rawGy = 0f
+        private var rawGz = 0f
+        private var hasRaw = false
+        private var gInit = false
+        private var sx = 0f; private var sy = 0f; private var sz = 0f       // gia tốc đã lọc
+        private var pnx = 0f; private var pny = 0f; private var pnz = 0f    // hướng khung trước
+        private var bx = 0f; private var by = 0f; private var bz = 0f       // hướng nền (tư thế đang cầm)
+        private var tiltRx = 0f
+        private var tiltRy = 0f
 
         private val sensorListener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                if (!shown || event.values.size < 3) return
-                val nowNs = event.timestamp
-                val dt = if (lastSensorNs == 0L) 0.02f else ((nowNs - lastSensorNs) * 1e-9f).coerceIn(0.001f, 0.1f)
-                lastSensorNs = nowNs
-
-                // TYPE_GRAVITY đã lọc sẵn. Với accelerometer fallback, low-pass mạnh hơn một chút.
-                val a = if (event.sensor.type == Sensor.TYPE_GRAVITY) {
-                    1f - exp((-2f * PI.toFloat() * 7f * dt))
-                } else {
-                    1f - exp((-2f * PI.toFloat() * 3.5f * dt))
-                }
-                if (!haveGravity) {
-                    gravity[0] = event.values[0]; gravity[1] = event.values[1]; gravity[2] = event.values[2]
-                    haveGravity = true
-                } else {
-                    for (i in 0..2) gravity[i] += (event.values[i] - gravity[i]) * a
-                }
-
-                // Chỉ cần pitch/roll theo trọng lực. Không dùng compass/yaw để tránh rung và drift.
-                val gx = gravity[0]
-                val gy = gravity[1]
-                val gz = gravity[2]
-                val rawRoll = Math.toDegrees(atan2(gx.toDouble(), sqrt((gy * gy + gz * gz).toDouble()))).toFloat()
-                val rawPitch = Math.toDegrees(atan2((-gy).toDouble(), sqrt((gx * gx + gz * gz).toDouble()))).toFloat()
-
-                targetRoll = (-rawRoll * G_TILT_GAIN).coerceIn(-G_TILT_MAX_DEG, G_TILT_MAX_DEG)
-                targetPitch = (-rawPitch * G_TILT_GAIN).coerceIn(-G_TILT_MAX_DEG, G_TILT_MAX_DEG)
-
-                val moved = abs(rawRoll - lastRawRoll) + abs(rawPitch - lastRawPitch)
-                if (moved > G_STILL_TILT_EPS_DEG) lastMotionAt = SystemClock.uptimeMillis()
-                lastRawRoll = rawRoll
-                lastRawPitch = rawPitch
+            override fun onSensorChanged(e: SensorEvent) {
+                rawGx = e.values[0]
+                rawGy = e.values[1]
+                rawGz = e.values[2]
+                hasRaw = true
             }
 
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
 
-        private val loop = object : Runnable {
-            override fun run() {
-                val t0 = SystemClock.uptimeMillis()
-                drawFrame(t0)
-                if (shown) {
-                    // Khi người dùng đang điều khiển vật thể, ưu tiên độ trễ thấp / chuyển động mượt.
-                    // Giữ 60fps xuyên suốt cả pha quán tính; Xperia Home đôi khi chỉ gửi offset
-                    // nên coi offset vừa thay đổi trong 180ms là một gesture đang diễn ra.
-                    val interactionActive = touching ||
-                        abs(yawVel) >= G_INERTIA_STOP_DPS ||
-                        abs(pitchVel) >= G_INERTIA_STOP_DPS ||
-                        (t0 - lastOffsetAt in 0..180L)
-                    val fps = when {
-                        interactionActive -> G_FPS_INTERACTION
-                        pm.isPowerSaveMode -> G_FPS_SAVER
-                        else -> G_FPS
-                    }
-                    handler.postDelayed(this, max(1L, 1000L / fps - (SystemClock.uptimeMillis() - t0)))
-                }
+        // ── vuốt xoay ──
+        private var touching = false
+        private var dragging = false
+        private var downX = 0f
+        private var downY = 0f
+        private var lastX = 0f
+        private var lastY = 0f
+        private var downT = 0L
+        private var lastMoveT = 0L
+        private var tRx = 0f          // góc vuốt đích
+        private var tRy = 0f
+        private var manRx = 0f        // góc vuốt hiện tại (đã làm mượt)
+        private var manRy = 0f
+        private var velRx = 0f        // độ/giây
+        private var velRy = 0f
+        private var lastOffsetX = -1f
+
+        // ── tự xoay khi rảnh ──
+        private var lastActiveAt = 0L
+        private var autoW = 1f
+
+        private var frameCount = 0
+        private val frameCb = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (!shown) return
+                frameCount++
+                val div = if (pm.isPowerSaveMode) max(1, G_FPS / G_FPS_SAVER) else 1
+                if (frameCount % div == 0) drawFrame(frameTimeNanos)
+                choreographer.postFrameCallback(this)
             }
         }
 
@@ -312,148 +285,125 @@ class GeminiWallpaperService : WallpaperService() {
             w = width
             h = height
             val aspect = w.toFloat() / h.toFloat()
-            // Khớp gem80k.html: PerspectiveCamera(75, aspect, 0.1, 2000), camera.position.z = 240.
-            camZ = 240f
+            // vừa khít chiều ngang màn hình dọc
+            camZ = max(240f, 170f / (0.767f * aspect))
             Matrix.perspectiveM(proj, 0, 75f, aspect, 0.1f, 2000f)
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
             shown = visible
-            handler.removeCallbacks(loop)
+            choreographer.removeFrameCallback(frameCb)
             if (visible) {
                 val now = SystemClock.uptimeMillis()
                 startAt = now
-                lastT = now
+                lastNs = System.nanoTime()
                 lastWaveAt = now
-                lastMotionAt = now
-                registerSensors()
-                handler.post(loop)
-            } else {
-                unregisterSensors()
-                velocityTracker?.recycle()
-                velocityTracker = null
+                lastActiveAt = now - G_IDLE_MS   // vào là tự xoay luôn
+                autoW = 1f
+                gInit = false                    // căn lại tư thế đang cầm = thẳng
+                tiltRx = 0f; tiltRy = 0f
+                velRx = 0f; velRy = 0f
                 touching = false
+                startSensor()
+                choreographer.postFrameCallback(frameCb)
+            } else {
+                stopSensor()
             }
-        }
-
-        private fun registerSensors() {
-            if (!sensorRegistered && gravitySensor != null) {
-                // GAME delay ~20 ms: đủ mượt ở 30 fps nhưng không ép sensor chạy quá nhanh.
-                sensorRegistered = sensorManager.registerListener(
-                    sensorListener, gravitySensor, SensorManager.SENSOR_DELAY_GAME
-                )
-                lastSensorNs = 0L
-            }
-        }
-
-        private fun unregisterSensors() {
-            if (sensorRegistered) sensorManager.unregisterListener(sensorListener)
-            sensorRegistered = false
-            lastSensorNs = 0L
         }
 
         override fun onSurfaceDestroyed(holder: SurfaceHolder) {
             shown = false
-            handler.removeCallbacks(loop)
-            unregisterSensors()
+            choreographer.removeFrameCallback(frameCb)
+            stopSensor()
             releaseGL()
             super.onSurfaceDestroyed(holder)
         }
 
         override fun onDestroy() {
             shown = false
-            handler.removeCallbacks(loop)
-            unregisterSensors()
-            velocityTracker?.recycle()
-            velocityTracker = null
+            choreographer.removeFrameCallback(frameCb)
+            stopSensor()
             releaseGL()
             super.onDestroy()
         }
 
-        // Orbit/trackball nhẹ: mỗi delta được nhân vào orientation hiện tại.
-        // Xoay theo local axes giúp kéo xuyên qua cực vẫn liên tục và kéo chéo tạo cảm giác 3D tự nhiên.
-        private fun applyOrbitDelta(yawDeg: Float, pitchDeg: Float) {
-            if (yawDeg == 0f && pitchDeg == 0f) return
-            if (yawDeg != 0f) Matrix.rotateM(userRotation, 0, yawDeg, 0f, 1f, 0f)
-            if (pitchDeg != 0f) Matrix.rotateM(userRotation, 0, pitchDeg, 1f, 0f, 0f)
+        private fun startSensor() {
+            val s = gravSensor ?: return
+            sm.registerListener(sensorListener, s, SensorManager.SENSOR_DELAY_GAME)
         }
 
-        // Vuốt → xoay trực tiếp; thả → tiếp tục theo quán tính rồi hãm dần.
-        // Tap ngắn vẫn giữ hành vi bắn sóng đổi màu.
+        private fun stopSensor() {
+            sm.unregisterListener(sensorListener)
+            hasRaw = false
+        }
+
+        // ── chạm / vuốt ──
         override fun onTouchEvent(event: MotionEvent) {
-            velocityTracker?.addMovement(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    velocityTracker?.recycle()
-                    velocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
                     touching = true
-                    downX = event.x
-                    downY = event.y
-                    lastTouchX = event.x
-                    lastTouchY = event.y
-                    dragDistance = 0f
-                    yawVel = 0f
-                    pitchVel = 0f
-                    lastMotionAt = SystemClock.uptimeMillis()
+                    dragging = false
+                    downX = event.x; downY = event.y
+                    lastX = event.x; lastY = event.y
+                    downT = event.eventTime
+                    lastMoveT = event.eventTime
+                    velRx = 0f; velRy = 0f
                 }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = event.x - lastTouchX
-                    val dy = event.y - lastTouchY
-                    dragDistance += sqrt(dx * dx + dy * dy)
-                    val sx = max(1, w).toFloat()
-                    val sy = max(1, h).toFloat()
-                    applyOrbitDelta(
-                        dx / sx * G_DRAG_DEG_PER_SCREEN,
-                        dy / sy * G_DRAG_DEG_PER_SCREEN
-                    )
-                    lastTouchX = event.x
-                    lastTouchY = event.y
-                    lastMotionAt = SystemClock.uptimeMillis()
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val wasTap = dragDistance < touchSlop &&
-                        abs(event.x - downX) < touchSlop && abs(event.y - downY) < touchSlop
-                    if (event.actionMasked == MotionEvent.ACTION_UP && wasTap) {
-                        triggerWave(SystemClock.uptimeMillis())
-                    } else {
-                        velocityTracker?.computeCurrentVelocity(1000)
-                        val sx = max(1, w).toFloat()
-                        val sy = max(1, h).toFloat()
-                        yawVel = ((velocityTracker?.xVelocity ?: 0f) / sx * G_DRAG_DEG_PER_SCREEN)
-                            .coerceIn(-360f, 360f)
-                        pitchVel = ((velocityTracker?.yVelocity ?: 0f) / sy * G_DRAG_DEG_PER_SCREEN)
-                            .coerceIn(-240f, 240f)
+
+                MotionEvent.ACTION_MOVE -> if (touching) {
+                    if (!dragging && hypot(event.x - downX, event.y - downY) > touchSlop) {
+                        dragging = true
+                        lastX = event.x; lastY = event.y   // bỏ đoạn trượt trong vùng slop
+                        lastMoveT = event.eventTime
+                    } else if (dragging) {
+                        val dx = event.x - lastX
+                        val dy = event.y - lastY
+                        tRy += dx * G_DRAG_DEG_PER_PX
+                        tRx = (tRx + dy * G_DRAG_DEG_PER_PX).coerceIn(-G_MAX_PITCH_DEG, G_MAX_PITCH_DEG)
+                        val dts = ((event.eventTime - lastMoveT) / 1000f).coerceAtLeast(0.004f)
+                        velRy = velRy * 0.6f + (dx * G_DRAG_DEG_PER_PX / dts) * 0.4f
+                        velRx = velRx * 0.6f + (dy * G_DRAG_DEG_PER_PX / dts) * 0.4f
+                        lastMoveT = event.eventTime
+                        lastX = event.x; lastY = event.y
+                        lastActiveAt = SystemClock.uptimeMillis()
                     }
+                }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (touching) {
                     touching = false
-                    velocityTracker?.recycle()
-                    velocityTracker = null
-                    lastMotionAt = SystemClock.uptimeMillis()
+                    if (event.actionMasked == MotionEvent.ACTION_UP && !dragging &&
+                        event.eventTime - downT < 300
+                    ) {
+                        triggerWave(SystemClock.uptimeMillis())   // chạm nhẹ → sóng đổi màu
+                    }
+                    if (dragging) {
+                        // dừng ngón trước khi nhấc thì không văng
+                        if (event.eventTime - lastMoveT > 80) {
+                            velRx = 0f; velRy = 0f
+                        }
+                        velRx = velRx.coerceIn(-G_FLING_MAX, G_FLING_MAX)
+                        velRy = velRy.coerceIn(-G_FLING_MAX, G_FLING_MAX)
+                    }
+                    dragging = false
+                    lastActiveAt = SystemClock.uptimeMillis()
                 }
             }
             super.onTouchEvent(event)
         }
 
-        // Xperia Home thường giữ gesture vuốt trang cho launcher. Offset là fallback để wallpaper
-        // vẫn phản ứng khi người dùng lướt Home, kể cả lúc không nhận được ACTION_MOVE trực tiếp.
+        // launcher nuốt cú vuốt → vẫn nhận được qua vuốt chuyển trang (nếu launcher hỗ trợ cuộn hình nền)
         override fun onOffsetsChanged(
             xOffset: Float, yOffset: Float, xOffsetStep: Float, yOffsetStep: Float,
             xPixelOffset: Int, yPixelOffset: Int
         ) {
-            val now = SystemClock.uptimeMillis()
-            if (!touching && lastOffsetX >= 0f) {
-                val dx = xOffset - lastOffsetX
-                if (abs(dx) < 0.5f) { // bỏ qua wrap 0 ↔ 1 ở launcher vòng
-                    offsetYaw += dx * 75f
-                    if (abs(dx) > 0.0005f) {
-                        val dt = ((now - lastOffsetAt) / 1000f).coerceIn(0.008f, 0.12f)
-                        val v = dx / dt * 75f
-                        yawVel = (yawVel * 0.55f + v * 0.45f).coerceIn(-300f, 300f)
-                        lastMotionAt = now
-                    }
+            if (lastOffsetX >= 0f) {
+                val d = xOffset - lastOffsetX
+                if (abs(d) < 0.5f) {
+                    tRy -= d * G_OFFSET_DEG
+                    lastActiveAt = SystemClock.uptimeMillis()
                 }
             }
             lastOffsetX = xOffset
-            lastOffsetAt = now
             super.onOffsetsChanged(xOffset, yOffset, xOffsetStep, yOffsetStep, xPixelOffset, yPixelOffset)
         }
 
@@ -494,7 +444,9 @@ class GeminiWallpaperService : WallpaperService() {
             )
             surf = EGL14.eglCreateWindowSurface(dpy, cfg, holder.surface, intArrayOf(EGL14.EGL_NONE), 0)
             if (ctx == EGL14.EGL_NO_CONTEXT || surf == EGL14.EGL_NO_SURFACE) return false
-            return EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
+            if (!EGL14.eglMakeCurrent(dpy, surf, surf, ctx)) return false
+            EGL14.eglSwapInterval(dpy, 1)   // khóa theo vsync cho mượt
+            return true
         }
 
         private fun compile(type: Int, src: String): Int {
@@ -533,10 +485,8 @@ class GeminiWallpaperService : WallpaperService() {
             locCore = GLES20.glGetUniformLocation(prog, "uCore")
             locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
-            locSymCount = GLES20.glGetUniformLocation(prog, "uSymCount")
 
             val symCount = buildAtlas()
-            symbolCount = symCount
 
             // dữ liệu hạt: angle, rad, zOffset, speed, symbol (5 float / hạt)
             val buf = ByteBuffer.allocateDirect(G_PARTICLES * 5 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
@@ -571,7 +521,7 @@ class GeminiWallpaperService : WallpaperService() {
             if (syms.isEmpty()) syms = listOf("+")
             syms = syms.take(16)
 
-            val bmp = Bitmap.createBitmap(syms.size * 64, 64, Bitmap.Config.ARGB_8888)
+            val bmp = Bitmap.createBitmap(1024, 64, Bitmap.Config.ARGB_8888)
             val cv = Canvas(bmp)
             val fm = p.fontMetrics
             val baseY = 32f - (fm.ascent + fm.descent) / 2f
@@ -582,7 +532,8 @@ class GeminiWallpaperService : WallpaperService() {
             tex = ids[0]
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
@@ -611,34 +562,76 @@ class GeminiWallpaperService : WallpaperService() {
             glReady = false
         }
 
+        // ── nghiêng máy: trả về tốc độ đổi góc (độ/giây) để biết đang cử động hay yên ──
+        private fun updateTilt(dt: Float): Float {
+            if (!hasRaw || dt <= 0f) return 0f
+
+            val a = 1f - exp(-dt / G_SENSOR_LP_S)
+            if (!gInit) {
+                sx = rawGx; sy = rawGy; sz = rawGz
+            } else {
+                sx += (rawGx - sx) * a
+                sy += (rawGy - sy) * a
+                sz += (rawGz - sz) * a
+            }
+            val len = sqrt(sx * sx + sy * sy + sz * sz)
+            if (len < 1e-3f) return 0f
+            val nx = sx / len
+            val ny = sy / len
+            val nz = sz / len
+
+            if (!gInit) {
+                bx = nx; by = ny; bz = nz
+                pnx = nx; pny = ny; pnz = nz
+                gInit = true
+            }
+
+            // tốc độ nghiêng
+            val dot = (nx * pnx + ny * pny + nz * pnz).coerceIn(-1f, 1f)
+            val speed = Math.toDegrees(acos(dot).toDouble()).toFloat() / dt
+            pnx = nx; pny = ny; pnz = nz
+
+            // hướng nền trôi dần theo tư thế đang cầm → tự căn giữa
+            val kb = 1f - exp(-dt / G_TILT_RECENTER_S)
+            bx += (nx - bx) * kb
+            by += (ny - by) * kb
+            bz += (nz - bz) * kb
+            val bl = sqrt(bx * bx + by * by + bz * bz)
+            if (bl > 1e-6f) { bx /= bl; by /= bl; bz /= bl }
+
+            // vector quay từ nền → hiện tại (rad), lấy thành phần quanh trục x, y của máy
+            val cx = by * nz - bz * ny
+            val cy = bz * nx - bx * nz
+            val cz = bx * ny - by * nx
+            val s = sqrt(cx * cx + cy * cy + cz * cz)
+            val c = bx * nx + by * ny + bz * nz
+            val ang = atan2(s, c)
+            var rx = 0f
+            var ry = 0f
+            if (s > 1e-6f) {
+                val f = ang / s
+                rx = cx * f
+                ry = cy * f
+            }
+            val tx = (Math.toDegrees(rx.toDouble()).toFloat() * G_TILT_GAIN * G_TILT_SIGN_X)
+                .coerceIn(-G_TILT_MAX_DEG, G_TILT_MAX_DEG)
+            val ty = (Math.toDegrees(ry.toDouble()).toFloat() * G_TILT_GAIN * G_TILT_SIGN_Y)
+                .coerceIn(-G_TILT_MAX_DEG, G_TILT_MAX_DEG)
+
+            val ks = 1f - exp(-dt / G_TILT_SMOOTH_S)
+            tiltRx += (tx - tiltRx) * ks
+            tiltRy += (ty - tiltRy) * ks
+            return speed
+        }
+
         // ── khung hình ──
-        private fun drawFrame(now: Long) {
+        private fun drawFrame(nowNs: Long) {
             if (!glReady || w == 0) return
             try {
-                val dt = ((now - lastT) / 1000f).coerceIn(0f, 0.1f)
-                lastT = now
-                animTime += dt
+                val now = nowNs / 1_000_000L
+                val dt = ((nowNs - lastNs) / 1_000_000_000f).coerceIn(0f, 0.1f)
+                lastNs = nowNs
                 morph += dt * 0.5f
-
-                // Tilt low-pass ở nhịp render để không phụ thuộc tần số sensor.
-                val tiltA = 1f - exp((-2f * PI.toFloat() * G_TILT_SMOOTH_HZ * dt))
-                tiltPitch += (targetPitch - tiltPitch) * tiltA
-                tiltRoll += (targetRoll - tiltRoll) * tiltA
-
-                // Quán tính gesture: tiếp tục xoay trên chính orientation hiện tại rồi hãm dần.
-                // Vì tích lũy bằng ma trận nên không có điểm gãy ±90° như Euler pitch/yaw.
-                if (!touching) {
-                    if (yawVel != 0f || pitchVel != 0f) {
-                        applyOrbitDelta(yawVel * dt, pitchVel * dt)
-                    }
-                    val damp = exp(-G_INERTIA_FRICTION * dt)
-                    yawVel *= damp
-                    pitchVel *= damp
-                    if (abs(yawVel) < G_INERTIA_STOP_DPS) yawVel = 0f
-                    if (abs(pitchVel) < G_INERTIA_STOP_DPS) pitchVel = 0f
-                }
-
-                val inertial = abs(yawVel) + abs(pitchVel) > G_INERTIA_STOP_DPS * 1.5f
 
                 if (G_AUTO_WAVE_MS > 0 && now - lastWaveAt > G_AUTO_WAVE_MS) triggerWave(now)
 
@@ -648,6 +641,46 @@ class GeminiWallpaperService : WallpaperService() {
                     wv.radius += dt * 650f
                     if (wv.radius >= 1200f) iter.remove()
                 }
+
+                // ── tương tác: nghiêng + vuốt ──
+                val tiltSpeed = updateTilt(dt)
+
+                if (!touching) {
+                    // quán tính sau khi thả tay
+                    tRy += velRy * dt
+                    tRx = (tRx + velRx * dt).coerceIn(-G_MAX_PITCH_DEG, G_MAX_PITCH_DEG)
+                    val decay = exp(-dt * G_FLING_DECAY)
+                    velRy *= decay
+                    velRx *= decay
+                    if (abs(velRy) < 1f) velRy = 0f
+                    if (abs(velRx) < 1f) velRx = 0f
+                }
+
+                val active = touching || abs(velRx) + abs(velRy) > 15f || tiltSpeed > G_MOVE_THRESHOLD
+                if (active) lastActiveAt = now
+                val idle = now - lastActiveAt > G_IDLE_MS
+
+                // rảnh thì góc vuốt về dần (không xoay ngược cả vòng)
+                if (idle && !touching && G_MANUAL_RETURN_S > 0f) {
+                    val n = round(tRy / 360f)
+                    if (n != 0f) {
+                        tRy -= 360f * n
+                        manRy -= 360f * n
+                    }
+                    val kr = exp(-dt / G_MANUAL_RETURN_S)
+                    tRx *= kr
+                    tRy *= kr
+                }
+
+                val km = 1f - exp(-dt / G_TOUCH_SMOOTH_S)
+                manRx += (tRx - manRx) * km
+                manRy += (tRy - manRy) * km
+
+                // tự xoay chỉ chạy khi yên; pha dừng lại khi tương tác nên không bị giật lúc quay lại
+                val target = if (idle) 1f else 0f
+                val tau = if (target > autoW) G_AUTO_FADE_IN_S else G_AUTO_FADE_OUT_S
+                autoW += (target - autoW) * (1f - exp(-dt / tau))
+                animTime += dt * autoW
 
                 // xuất hiện dần: trễ 0.5s rồi lerp 5%/16ms như bản gốc
                 val te = (now - startAt) / 1000f - 0.5f
@@ -659,32 +692,22 @@ class GeminiWallpaperService : WallpaperService() {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
                 if (scale > 0.001f) {
-                    // Hologram + free orbit:
-                    // 1) tilt/launcher offset là lớp tham chiếu theo thiết bị / Home;
-                    // 2) userRotation là orientation 3D tự do do vuốt + quán tính tích lũy.
+                    // xoay tự động (như bản gốc) × autoW + nghiêng máy + vuốt
+                    val r = animTime * 0.25f
+                    val s2 = kotlin.math.sin(r * 2f)
+                    val s1 = kotlin.math.sin(r)
+                    val rxA = Math.toDegrees((s2 * s2 * s2 * 0.4f).toDouble()).toFloat()
+                    val ryA = Math.toDegrees((s1 * s1 * s1 * 0.6f).toDouble()).toFloat()
+                    val rzA = Math.toDegrees((s1 * s1 * s1 * -0.3f).toDouble()).toFloat()
+                    val rx = rxA * autoW + tiltRx + manRx
+                    val ry = ryA * autoW + tiltRy + manRy
+                    val rz = rzA * autoW
+
                     Matrix.setIdentityM(mv, 0)
                     Matrix.translateM(mv, 0, 0f, 0f, -camZ)
-                    Matrix.rotateM(mv, 0, tiltPitch, 1f, 0f, 0f)
-                    Matrix.rotateM(mv, 0, tiltRoll + offsetYaw, 0f, 1f, 0f)
-                    Matrix.rotateM(mv, 0, -tiltRoll * 0.20f, 0f, 0f, 1f)
-
-                    // Chuyển động nền bám gem80k.html:
-                    // r = animTime * 0.25
-                    // rotX = sin(2r)^3 * 0.4 rad
-                    // rotY = sin(r)^3 * 0.6 rad
-                    // rotZ = sin(r)^3 * -0.3 rad
-                    val r = animTime * 0.25f
-                    val sr = kotlin.math.sin(r)
-                    val s2r = kotlin.math.sin(r * 2f)
-                    val baseRotX = s2r * s2r * s2r * 0.4f * (180f / PI.toFloat())
-                    val baseRotY = sr * sr * sr * 0.6f * (180f / PI.toFloat())
-                    val baseRotZ = sr * sr * sr * -0.3f * (180f / PI.toFloat())
-                    Matrix.rotateM(mv, 0, baseRotX, 1f, 0f, 0f)
-                    Matrix.rotateM(mv, 0, baseRotY, 0f, 1f, 0f)
-                    Matrix.rotateM(mv, 0, baseRotZ, 0f, 0f, 1f)
-
-                    Matrix.multiplyMM(rotTmp, 0, mv, 0, userRotation, 0)
-                    System.arraycopy(rotTmp, 0, mv, 0, 16)
+                    Matrix.rotateM(mv, 0, rx, 1f, 0f, 0f)
+                    Matrix.rotateM(mv, 0, ry, 0f, 1f, 0f)
+                    Matrix.rotateM(mv, 0, rz, 0f, 0f, 1f)
                     Matrix.scaleM(mv, 0, scale, scale, scale)
 
                     val shape = (3.5f + G_SPARK_N) / 2f +
@@ -711,7 +734,6 @@ class GeminiWallpaperService : WallpaperService() {
                     GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
                     GLES20.glUniform1i(locTex, 0)
-                    GLES20.glUniform1f(locSymCount, symbolCount.toFloat())
 
                     GLES20.glEnable(GLES20.GL_BLEND)
                     GLES20.glBlendFuncSeparate(
