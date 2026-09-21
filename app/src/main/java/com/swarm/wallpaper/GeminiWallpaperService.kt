@@ -36,7 +36,8 @@ import kotlin.math.max
 import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val G_PARTICLES = 20000     // số hạt
+private const val G_PARTICLES = 15000     // số hạt
+private const val G_RENDER_SCALE = 0.75f  // render ở % độ phân giải màn (1f = gốc). Giảm fill-rate, GPU tự phóng to
 private const val G_FPS = 30              // fps bình thường
 private const val G_FPS_SAVER = 15        // fps khi bật Tiết kiệm pin
 private const val G_AUTO_WAVE_MS = 8000L  // tự bắn sóng đổi màu mỗi N ms (0 = tắt, chỉ chạm mới đổi)
@@ -129,9 +130,9 @@ uniform sampler2D uTex;
 void main() {
     vec2 uv = gl_PointCoord;
     uv.x = (uv.x + vSym) / 16.0;
-    vec4 t = texture2D(uTex, uv);
-    if (t.a < 0.1) discard;
-    gl_FragColor = vec4(vColor, t.a);
+    // thay discard: cắt viền alpha<0.1 bằng phép tính liên tục (blend cộng nên alpha≈0 không đóng góp)
+    float a = max(texture2D(uTex, uv).a - 0.1, 0.0) * 1.1111;
+    gl_FragColor = vec4(vColor, a);
 }
 """
 
@@ -143,7 +144,7 @@ class GeminiWallpaperService : WallpaperService() {
     private inner class GemEngine : Engine(), SensorEventListener {
         private val handler = Handler(Looper.getMainLooper())
         private val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        private val pixelRatio = resources.displayMetrics.density
+        private val pixelRatio = resources.displayMetrics.density * G_RENDER_SCALE
 
         private val sm = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         private val accel: Sensor? = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -225,6 +226,12 @@ class GeminiWallpaperService : WallpaperService() {
         override fun onCreate(surfaceHolder: SurfaceHolder) {
             super.onCreate(surfaceHolder)
             setTouchEventsEnabled(true)
+            if (G_RENDER_SCALE < 1f) {
+                val dm = resources.displayMetrics
+                val sw = minOf(dm.widthPixels, dm.heightPixels)
+                val sh = maxOf(dm.widthPixels, dm.heightPixels)
+                surfaceHolder.setFixedSize((sw * G_RENDER_SCALE).toInt(), (sh * G_RENDER_SCALE).toInt())
+            }
         }
 
         override fun onSurfaceCreated(holder: SurfaceHolder) {
@@ -423,6 +430,23 @@ class GeminiWallpaperService : WallpaperService() {
             vbo = ids[0]
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_PARTICLES * 5 * 4, buf, GLES20.GL_STATIC_DRAW)
+
+            // state bất biến: đặt 1 lần, không lặp mỗi khung
+            GLES20.glUseProgram(prog)
+            GLES20.glUniform3fv(locCore, 4, coreArr, 0)
+            GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+            GLES20.glUniform1i(locTex, 0)
+            GLES20.glDisable(GLES20.GL_DITHER)
+            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFuncSeparate(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE, GLES20.GL_ZERO, GLES20.GL_ONE)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
+            GLES20.glEnableVertexAttribArray(locP)
+            GLES20.glVertexAttribPointer(locP, 4, GLES20.GL_FLOAT, false, 20, 0)
+            GLES20.glEnableVertexAttribArray(locSym)
+            GLES20.glVertexAttribPointer(locSym, 1, GLES20.GL_FLOAT, false, 20, 16)
             return true
         }
 
@@ -513,7 +537,6 @@ class GeminiWallpaperService : WallpaperService() {
                 val te = (now - startAt) / 1000f - 0.5f
                 val scale = if (te <= 0f) 0f else 1f - exp(-3.2f * te)
 
-                if (!EGL14.eglMakeCurrent(dpy, surf, surf, ctx)) return
                 GLES20.glViewport(0, 0, w, h)
                 GLES20.glClearColor(0f, 0f, 0f, 1f)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -547,33 +570,13 @@ class GeminiWallpaperService : WallpaperService() {
                         waveArr[i * 4 + 3] = 1f
                     }
 
-                    GLES20.glUseProgram(prog)
                     GLES20.glUniformMatrix4fv(locMV, 1, false, mv, 0)
                     GLES20.glUniformMatrix4fv(locProj, 1, false, proj, 0)
                     GLES20.glUniform1f(locShape, shape)
                     GLES20.glUniform1f(locState, stateIndex.toFloat())
                     GLES20.glUniform1f(locPR, pixelRatio * G_SIZE_BOOST)
                     GLES20.glUniform4fv(locWave, 4, waveArr, 0)
-                    GLES20.glUniform3fv(locCore, 4, coreArr, 0)
-                    GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
-
-                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
-                    GLES20.glUniform1i(locTex, 0)
-
-                    GLES20.glEnable(GLES20.GL_BLEND)
-                    GLES20.glBlendFuncSeparate(
-                        GLES20.GL_SRC_ALPHA, GLES20.GL_ONE, GLES20.GL_ZERO, GLES20.GL_ONE
-                    )
-
-                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
-                    GLES20.glEnableVertexAttribArray(locP)
-                    GLES20.glVertexAttribPointer(locP, 4, GLES20.GL_FLOAT, false, 20, 0)
-                    GLES20.glEnableVertexAttribArray(locSym)
-                    GLES20.glVertexAttribPointer(locSym, 1, GLES20.GL_FLOAT, false, 20, 16)
                     GLES20.glDrawArrays(GLES20.GL_POINTS, 0, G_PARTICLES)
-                    GLES20.glDisableVertexAttribArray(locP)
-                    GLES20.glDisableVertexAttribArray(locSym)
                 }
 
                 EGL14.eglSwapBuffers(dpy, surf)
