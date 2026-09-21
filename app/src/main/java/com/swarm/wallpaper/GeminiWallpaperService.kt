@@ -207,8 +207,10 @@ class GeminiWallpaperService : WallpaperService() {
         private var lastTouchX = 0f
         private var lastTouchY = 0f
         private var dragDistance = 0f
-        private var userYaw = 0f
-        private var userPitch = 0f
+        // Hướng xoay do người dùng được tích lũy trực tiếp bằng ma trận 3D.
+        // Không còn clamp pitch ±75° nên có thể xoay xuyên qua các cực / lật tự do.
+        private val userRotation = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
+        private val rotTmp = FloatArray(16)
         private var yawVel = 0f
         private var pitchVel = 0f
         private var velocityTracker: VelocityTracker? = null
@@ -365,6 +367,14 @@ class GeminiWallpaperService : WallpaperService() {
             super.onDestroy()
         }
 
+        // Orbit/trackball nhẹ: mỗi delta được nhân vào orientation hiện tại.
+        // Xoay theo local axes giúp kéo xuyên qua cực vẫn liên tục và kéo chéo tạo cảm giác 3D tự nhiên.
+        private fun applyOrbitDelta(yawDeg: Float, pitchDeg: Float) {
+            if (yawDeg == 0f && pitchDeg == 0f) return
+            if (yawDeg != 0f) Matrix.rotateM(userRotation, 0, yawDeg, 0f, 1f, 0f)
+            if (pitchDeg != 0f) Matrix.rotateM(userRotation, 0, pitchDeg, 1f, 0f, 0f)
+        }
+
         // Vuốt → xoay trực tiếp; thả → tiếp tục theo quán tính rồi hãm dần.
         // Tap ngắn vẫn giữ hành vi bắn sóng đổi màu.
         override fun onTouchEvent(event: MotionEvent) {
@@ -389,8 +399,10 @@ class GeminiWallpaperService : WallpaperService() {
                     dragDistance += sqrt(dx * dx + dy * dy)
                     val sx = max(1, w).toFloat()
                     val sy = max(1, h).toFloat()
-                    userYaw += dx / sx * G_DRAG_DEG_PER_SCREEN
-                    userPitch = (userPitch + dy / sy * G_DRAG_DEG_PER_SCREEN).coerceIn(-75f, 75f)
+                    applyOrbitDelta(
+                        dx / sx * G_DRAG_DEG_PER_SCREEN,
+                        dy / sy * G_DRAG_DEG_PER_SCREEN
+                    )
                     lastTouchX = event.x
                     lastTouchY = event.y
                     lastMotionAt = SystemClock.uptimeMillis()
@@ -609,10 +621,12 @@ class GeminiWallpaperService : WallpaperService() {
                 tiltPitch += (targetPitch - tiltPitch) * tiltA
                 tiltRoll += (targetRoll - tiltRoll) * tiltA
 
-                // Quán tính gesture: tích phân vận tốc + exponential damping độc lập FPS.
+                // Quán tính gesture: tiếp tục xoay trên chính orientation hiện tại rồi hãm dần.
+                // Vì tích lũy bằng ma trận nên không có điểm gãy ±90° như Euler pitch/yaw.
                 if (!touching) {
-                    userYaw += yawVel * dt
-                    userPitch = (userPitch + pitchVel * dt).coerceIn(-75f, 75f)
+                    if (yawVel != 0f || pitchVel != 0f) {
+                        applyOrbitDelta(yawVel * dt, pitchVel * dt)
+                    }
                     val damp = exp(-G_INERTIA_FRICTION * dt)
                     yawVel *= damp
                     pitchVel *= damp
@@ -622,7 +636,7 @@ class GeminiWallpaperService : WallpaperService() {
 
                 val inertial = abs(yawVel) + abs(pitchVel) > G_INERTIA_STOP_DPS * 1.5f
                 val autoActive = !touching && !inertial && now - lastMotionAt >= G_AUTO_DELAY_MS
-                if (autoActive) userYaw += G_AUTO_YAW_DPS * dt
+                if (autoActive) applyOrbitDelta(G_AUTO_YAW_DPS * dt, 0f)
 
                 if (G_AUTO_WAVE_MS > 0 && now - lastWaveAt > G_AUTO_WAVE_MS) triggerWave(now)
 
@@ -643,16 +657,16 @@ class GeminiWallpaperService : WallpaperService() {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
                 if (scale > 0.001f) {
-                    // Hologram: máy nghiêng sang đâu, vật thể bù ngược sang đó.
-                    // Auto rotation chỉ được cộng vào userYaw khi máy đã đứng yên đủ lâu.
-                    val rx = userPitch + tiltPitch
-                    val ry = userYaw + offsetYaw + tiltRoll
-                    val rz = -tiltRoll * 0.20f
+                    // Hologram + free orbit:
+                    // 1) tilt/launcher offset là lớp tham chiếu theo thiết bị / Home;
+                    // 2) userRotation là orientation 3D tự do do vuốt + quán tính tích lũy.
                     Matrix.setIdentityM(mv, 0)
                     Matrix.translateM(mv, 0, 0f, 0f, -camZ)
-                    Matrix.rotateM(mv, 0, rx, 1f, 0f, 0f)
-                    Matrix.rotateM(mv, 0, ry, 0f, 1f, 0f)
-                    Matrix.rotateM(mv, 0, rz, 0f, 0f, 1f)
+                    Matrix.rotateM(mv, 0, tiltPitch, 1f, 0f, 0f)
+                    Matrix.rotateM(mv, 0, tiltRoll + offsetYaw, 0f, 1f, 0f)
+                    Matrix.rotateM(mv, 0, -tiltRoll * 0.20f, 0f, 0f, 1f)
+                    Matrix.multiplyMM(rotTmp, 0, mv, 0, userRotation, 0)
+                    System.arraycopy(rotTmp, 0, mv, 0, 16)
                     Matrix.scaleM(mv, 0, scale, scale, scale)
 
                     val shape = (3.5f + G_SPARK_N) / 2f +
