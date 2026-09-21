@@ -31,7 +31,7 @@ import kotlin.math.max
 import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val G_PARTICLES = 20000     // số hạt
+private const val G_PARTICLES = 80000     // số hạt
 private const val G_FPS = 30              // fps bình thường
 private const val G_FPS_SAVER = 15        // fps khi bật Tiết kiệm pin
 private const val G_AUTO_WAVE_MS = 8000L  // tự bắn sóng đổi màu mỗi N ms (0 = tắt, chỉ chạm mới đổi)
