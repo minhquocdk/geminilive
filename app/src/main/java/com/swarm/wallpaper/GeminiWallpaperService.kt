@@ -42,7 +42,8 @@ import kotlin.random.Random
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
 private const val G_PARTICLES = 20000     // số hạt
 private const val G_FPS = 30              // fps bình thường
-private const val G_FPS_SAVER = 15        // fps khi bật Tiết kiệm pin
+private const val G_FPS_INTERACTION = 60  // 60fps khi vuốt / quán tính / launcher đang scroll
+private const val G_FPS_SAVER = 15        // fps khi bật Tiết kiệm pin (khi không tương tác)
 private const val G_AUTO_WAVE_MS = 8000L  // tự bắn sóng đổi màu mỗi N ms (0 = tắt, chỉ chạm mới đổi)
 private const val G_SPARK_N = 0.7f        // độ "nhọn" của hình sparkle
 private const val G_SIZE_BOOST = 1.6f     // nhân kích thước ký tự cho dễ nhìn trên màn hình nhỏ
@@ -260,7 +261,18 @@ class GeminiWallpaperService : WallpaperService() {
                 val t0 = SystemClock.uptimeMillis()
                 drawFrame(t0)
                 if (shown) {
-                    val fps = if (pm.isPowerSaveMode) G_FPS_SAVER else G_FPS
+                    // Khi người dùng đang điều khiển vật thể, ưu tiên độ trễ thấp / chuyển động mượt.
+                    // Giữ 60fps xuyên suốt cả pha quán tính; Xperia Home đôi khi chỉ gửi offset
+                    // nên coi offset vừa thay đổi trong 180ms là một gesture đang diễn ra.
+                    val interactionActive = touching ||
+                        abs(yawVel) >= G_INERTIA_STOP_DPS ||
+                        abs(pitchVel) >= G_INERTIA_STOP_DPS ||
+                        (t0 - lastOffsetAt in 0..180L)
+                    val fps = when {
+                        interactionActive -> G_FPS_INTERACTION
+                        pm.isPowerSaveMode -> G_FPS_SAVER
+                        else -> G_FPS
+                    }
                     handler.postDelayed(this, max(1L, 1000L / fps - (SystemClock.uptimeMillis() - t0)))
                 }
             }
