@@ -228,7 +228,7 @@ void main() {
 }
 """
 
-class Kascp3WallpaperService : WallpaperService() {
+class GeminiWallpaperService : WallpaperService() {
     override fun onCreateEngine(): Engine = KEngine()
 
     private inner class KEngine : Engine() {
