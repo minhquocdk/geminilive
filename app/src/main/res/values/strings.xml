@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Claude Swarm</string>
+    <string name="desc">Autonomous swarm terminal live wallpaper</string>
+    <string name="app_name_gemini">Gemini Particles</string>
+    <string name="desc_gemini">3D symbol particle fusion live wallpaper</string>
+</resources>
