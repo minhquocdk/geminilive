@@ -2,23 +2,18 @@ package com.swarm.wallpaper
 
 import android.app.WallpaperManager
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Typeface
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
 import android.opengl.GLES20
-import android.opengl.GLUtils
 import android.opengl.Matrix
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -26,271 +21,291 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.service.wallpaper.WallpaperService
 import android.view.MotionEvent
-import android.view.VelocityTracker
-import android.view.ViewConfiguration
 import android.view.SurfaceHolder
+import android.view.VelocityTracker
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
-import kotlin.math.exp
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.exp
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sqrt
 import kotlin.random.Random
 
-// ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val G_PARTICLES = 20000     // số hạt
-private const val G_FPS = 30              // fps bình thường
-private const val G_FPS_INTERACTION = 60  // 60fps khi vuốt / quán tính / launcher đang scroll
-private const val G_FPS_SAVER = 15        // fps khi bật Tiết kiệm pin (khi không tương tác)
-private const val G_AUTO_WAVE_MS = 8000L  // tự bắn sóng đổi màu mỗi N ms (0 = tắt, chỉ chạm mới đổi)
-private const val G_SPARK_N = 0.7f        // độ "nhọn" của hình sparkle
-private const val G_SIZE_BOOST = 1.6f     // nhân kích thước ký tự cho dễ nhìn trên màn hình nhỏ
-private const val G_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
-private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
+// Port trực tiếp các tham số chính từ gemini.js.
+private const val PARTICLE_COUNT = 80_000
+private const val COLOR_SATURATION = 0.75f
+private const val SCATTER_TOP = 1.0f
+private const val SCATTER_BOTTOM = 0.15f // Web dùng khi scroll; wallpaper không có DOM scroll.
+private const val ENTRANCE_DELAY_MS = 2_000L
+private const val ENTRANCE_GROW_SPEED = 0.8f
+private const val ENTRANCE_LINGER_SECONDS = 3.0f
+private const val SPARK_CURVE_N = 0.7f
+private const val ROUNDING_FACTOR = 0.18f
+private const val PARTICLE_RADIUS = 120f
+private const val WAVE_WIDTH = 75f
+private const val WAVE_SPEED = 750f
+private const val WAVE_END_RADIUS = 1500f
+private const val AUTO_RETURN_FORCE = 0.15f
+private const val AUTO_RETURN_FORCE_DECAY = 0.02f
 
-// Chuyển động: tinh chỉnh nhẹ cho Xperia XZ3 / Snapdragon 845 / màn 2K.
-private const val G_TILT_MAX_DEG = 18f          // giới hạn góc parallax do nghiêng máy
-private const val G_TILT_GAIN = 0.72f           // độ bám theo trọng lực (đối trọng)
-private const val G_TILT_SMOOTH_HZ = 5.0f       // low-pass; thấp hơn = mềm hơn
-private const val G_DRAG_DEG_PER_SCREEN = 150f  // vuốt hết bề ngang ~= 150 độ
-private const val G_INERTIA_FRICTION = 3.6f     // hãm quán tính (1/s)
-private const val G_INERTIA_STOP_DPS = 2.0f     // dưới ngưỡng này coi như dừng
-private const val G_AUTO_DELAY_MS = 1100L       // giữ yên bao lâu mới bắt đầu auto rotate
-private const val G_AUTO_YAW_DPS = 4.2f         // tự xoay rất nhẹ khi máy đứng yên
-private const val G_STILL_TILT_EPS_DEG = 0.18f  // biến thiên tilt nhỏ hơn mức này = gần như yên
+// Android-specific scheduling / interaction adaptation.
+private const val FPS_NORMAL = 30
+private const val FPS_INTERACTION = 60
+private const val FPS_SAVER = 15
+private const val DRAG_DEG_PER_SCREEN = 150f
+private const val INERTIA_FRICTION = 3.6f
+private const val INERTIA_STOP_DPS = 2f
+private const val TILT_MAX_DEG = 12f
+private const val TILT_GAIN = 0.45f
+private const val TILT_SMOOTH_HZ = 5f
+private const val MAX_GPU_WAVES = 8
 
-private class GWave(var radius: Float, val state: Int)
+private data class Wave(var radius: Float, val stateIndex: Int)
 
-// ───────────────────────── SHADER ─────────────────────────
-// Toàn bộ công thức hình học + màu + sóng từ file HTML gốc, chạy trên GPU.
-private const val VERT = """
-attribute vec4 aP;        // x=angle, y=rad, z=zOffset, w=speedScale
-attribute float aSym;
+/*
+ * aP = angle, radialRandom^5, zRandom, sizeRandom.
+ * Toàn bộ geometry/color/size loop của gemini.js được chuyển sang vertex shader để 80k hạt
+ * không phải cập nhật FloatArray trên CPU mỗi frame.
+ */
+private const val VERTEX_SHADER = """
+attribute vec4 aP;
 uniform mat4 uMV;
 uniform mat4 uProj;
 uniform float uShape;
-uniform float uState;
-uniform float uPR;
-uniform vec4 uWave[4];    // radius, state, width, active
+uniform float uScatter;
+uniform float uBaseState;
+uniform float uPixelRatio;
+uniform vec4 uWave[8];
 uniform vec3 uCore[4];
 uniform vec3 uAccent[4];
 varying vec3 vColor;
-varying float vSym;
+
+float smooth01(float x) {
+    x = clamp(x, 0.0, 1.0);
+    return x * x * (3.0 - 2.0 * x);
+}
 
 void main() {
-    float ang = aP.x;
-    float rad = aP.y;
-    float ca = cos(ang);
-    float sa = sin(ang);
-    float e = 2.0 / uShape;
-    float o = pow(max(abs(ca), 0.0001), e) * sign(ca);
-    float s = pow(max(abs(sa), 0.0001), e) * sign(sa);
-    float c2 = cos(2.0 * ang);
-    float rounding = 0.18 * c2 * c2;
-    float k = 120.0 * (1.0 + rad - 0.04);
-    float x = (o * (1.0 - rounding) + ca * rounding) * k;
-    float y = (s * (1.0 - rounding) + sa * rounding) * k;
-    float z = aP.z * 96.0;
-    float dist = max(length(vec3(x, y, z)), 0.001);
+    float angle = aP.x;
+    float radial = aP.y;
+    float ca = cos(angle);
+    float sa = sin(angle);
 
-    float state = uState;
+    float e = 2.0 / uShape;
+    float superX = pow(max(abs(ca), 0.0001), e) * sign(ca);
+    float superY = pow(max(abs(sa), 0.0001), e) * sign(sa);
+
+    float c2 = cos(2.0 * angle);
+    float rounding = ${ROUNDING_FACTOR} * c2 * c2;
+    float dx = superX * (1.0 - rounding) + ca * rounding;
+    float dy = superY * (1.0 - rounding) + sa * rounding;
+
+    float m = 1.0 + radial * uScatter - 0.04;
+    float x = dx * ${PARTICLE_RADIUS} * m;
+    float y = dy * ${PARTICLE_RADIUS} * m;
+    float z = aP.z * ${PARTICLE_RADIUS} * (0.1 + 1.2 * uScatter);
+
+    float dist3 = max(length(vec3(x, y, z)), 0.001);
+    float state = uBaseState;
     float boost = 1.0;
-    for (int i = 0; i < 4; i++) {
-        vec4 w = uWave[i];
-        if (w.w > 0.5) {
-            if (dist < w.x) state = w.y;
-            float d = abs(dist - w.x);
-            if (d < w.z) boost = max(boost, 1.0 + (1.0 - d / w.z) * 2.0);
+
+    for (int i = 0; i < 8; ++i) {
+        vec4 wave = uWave[i];
+        if (wave.w > 0.5) {
+            if (dist3 < wave.x) state = wave.y;
+            float d = abs(dist3 - wave.x);
+            if (d < wave.z) {
+                float q = 1.0 - d / wave.z;
+                boost = max(boost, 1.0 + q * 1.5);
+            }
         }
     }
-    int si = int(state + 0.5);
-    vec3 col = mix(uCore[si], uAccent[si], rad);
+
+    // gemini.js: N = smoothstep(0,1, smoothstep(.08,.55, radial))
+    float inner = smooth01((radial - 0.08) / (0.55 - 0.08));
+    float mixT = smooth01(inner);
+    vec3 core;
+    vec3 accent;
+    if (state < 0.5) {
+        core = uCore[0]; accent = uAccent[0];
+    } else if (state < 1.5) {
+        core = uCore[1]; accent = uAccent[1];
+    } else if (state < 2.5) {
+        core = uCore[2]; accent = uAccent[2];
+    } else {
+        core = uCore[3]; accent = uAccent[3];
+    }
+    vec3 col = mix(core, accent, mixT);
     if (boost > 1.0) col = min(vec3(1.0), col * boost);
     vColor = col;
 
-    float fade = 1.0 - clamp((dist - 40.0) / 220.0, 0.0, 1.0);
-    float size = aP.w * (0.8 + fade * 1.8) * (boost > 1.0 ? 1.4 : 1.0);
+    float fade = 1.0 - clamp((dist3 - 40.0) / 220.0, 0.0, 1.0);
+    float customSize = aP.w * (0.01 + fade * 1.8);
 
     vec4 mv = uMV * vec4(x, y, z, 1.0);
-    gl_PointSize = size * uPR * (300.0 / -mv.z);
+    gl_PointSize = customSize * uPixelRatio * (250.0 / max(1.0, -mv.z));
     gl_Position = uProj * mv;
-    vSym = aSym;
 }
 """
 
-private const val FRAG = """
+private const val FRAGMENT_SHADER = """
 precision mediump float;
 varying vec3 vColor;
-varying float vSym;
-uniform sampler2D uTex;
 
 void main() {
-    vec2 uv = gl_PointCoord;
-    uv.x = (uv.x + vSym) / 16.0;
-    vec4 t = texture2D(uTex, uv);
-    if (t.a < 0.1) discard;
-    gl_FragColor = vec4(vColor, t.a);
+    float dist = length(gl_PointCoord - vec2(0.5));
+    if (dist > 0.5) discard;
+    float t = clamp((dist - 0.4) / 0.1, 0.0, 1.0);
+    float smoothEdge = t * t * (3.0 - 2.0 * t);
+    float alpha = 1.0 - smoothEdge;
+    gl_FragColor = vec4(vColor, alpha);
 }
 """
 
-// ───────────────────────── WALLPAPER SERVICE ─────────────────────────
 class GeminiWallpaperService : WallpaperService() {
+    override fun onCreateEngine(): Engine = GeminiEngine()
 
-    override fun onCreateEngine(): Engine = GemEngine()
-
-    private inner class GemEngine : Engine() {
+    private inner class GeminiEngine : Engine() {
         private val handler = Handler(Looper.getMainLooper())
-        private val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        private val pixelRatio = resources.displayMetrics.density
+        private val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         private val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         private val gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
             ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        private val touchSlop = ViewConfiguration.get(this@GeminiWallpaperService).scaledTouchSlop.toFloat()
+        private val pixelRatio = resources.displayMetrics.density
 
-        private var shown = false
+        private var visible = false
         private var glReady = false
-
-        private var dpy: EGLDisplay = EGL14.EGL_NO_DISPLAY
-        private var ctx: EGLContext = EGL14.EGL_NO_CONTEXT
-        private var surf: EGLSurface = EGL14.EGL_NO_SURFACE
-
-        private var prog = 0
-        private var vbo = 0
-        private var tex = 0
-        private var locP = 0
-        private var locSym = 0
-        private var locMV = 0
-        private var locProj = 0
-        private var locShape = 0
-        private var locState = 0
-        private var locPR = 0
-        private var locWave = 0
-        private var locCore = 0
-        private var locAccent = 0
-        private var locTex = 0
-
-        private var w = 0
-        private var h = 0
-        private var camZ = 240f
-        private val proj = FloatArray(16)
-        private val mv = FloatArray(16)
-
-        private var startAt = 0L
-        private var lastT = 0L
-        private var animTime = 0f
-        private var morph = (-PI / 2).toFloat()
-        private var stateIndex = 0
-        private var lastWaveAt = 0L
-        private val waves = ArrayList<GWave>()
-        private val waveArr = FloatArray(16)
-        private val coreArr = FloatArray(12)
-        private val accentArr = FloatArray(12)
-
-        // ── tương tác / cảm biến ──
         private var sensorRegistered = false
+
+        private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
+        private var context: EGLContext = EGL14.EGL_NO_CONTEXT
+        private var surface: EGLSurface = EGL14.EGL_NO_SURFACE
+
+        private var program = 0
+        private var vbo = 0
+        private var locP = -1
+        private var locMV = -1
+        private var locProj = -1
+        private var locShape = -1
+        private var locScatter = -1
+        private var locBaseState = -1
+        private var locPixelRatio = -1
+        private var locWave = -1
+        private var locCore = -1
+        private var locAccent = -1
+
+        private var widthPx = 0
+        private var heightPx = 0
+        private var cameraZ = 240f
+        private val projection = FloatArray(16)
+        private val modelView = FloatArray(16)
+
+        // gemini.js timing state.
+        private var shownAtMs = 0L
+        private var lastFrameMs = 0L
+        private var visibleAnimSeconds = 0f
+        private var entranceScale = 0f
+        private var morphPhase = (-PI / 2.0).toFloat()
+        private var idleTime = 0f
+        private var scatter = SCATTER_TOP
+        private var targetScatter = SCATTER_TOP
+
+        // gemini.js: C = state đã phủ toàn bộ; w = state mới nhất đã chọn.
+        private var baseState = 3
+        private var selectedState = 3
+        private val waves = ArrayList<Wave>()
+        private val waveUniforms = FloatArray(MAX_GPU_WAVES * 4)
+        private val coreColors = FloatArray(12)
+        private val accentColors = FloatArray(12)
+
+        // Touch/mobile replacement for OrbitControls.
+        private var touching = false
+        private var interactionMode = false
+        private var lastTouchX = 0f
+        private var lastTouchY = 0f
+        private var userYaw = 0f
+        private var userPitch = 0f
+        private var yawVelocity = 0f
+        private var pitchVelocity = 0f
+        private var returnForce = AUTO_RETURN_FORCE
+        private var lastWaveAtMs = 0L
+        private var velocityTracker: VelocityTracker? = null
+
+        // Device tilt is Android-only parallax layered on top of the JS model.
         private val gravity = FloatArray(3)
         private var haveGravity = false
         private var lastSensorNs = 0L
+        private var targetTiltPitch = 0f
+        private var targetTiltRoll = 0f
         private var tiltPitch = 0f
         private var tiltRoll = 0f
-        private var targetPitch = 0f
-        private var targetRoll = 0f
-        private var lastRawPitch = 0f
-        private var lastRawRoll = 0f
-        private var lastMotionAt = 0L
-
-        private var touching = false
-        private var downX = 0f
-        private var downY = 0f
-        private var lastTouchX = 0f
-        private var lastTouchY = 0f
-        private var dragDistance = 0f
-        // Hướng xoay do người dùng được tích lũy trực tiếp bằng ma trận 3D.
-        // Không còn clamp pitch ±75° nên có thể xoay xuyên qua các cực / lật tự do.
-        private val userRotation = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
-        private val rotTmp = FloatArray(16)
-        private var yawVel = 0f
-        private var pitchVel = 0f
-        private var velocityTracker: VelocityTracker? = null
 
         private var lastOffsetX = -1f
         private var lastOffsetAt = 0L
-        private var offsetYaw = 0f
+        private var launcherYaw = 0f
+
+        init {
+            fillSaturatedColors(coreColors, arrayOf("#00B95C", "#FFCC00", "#FF4641", "#3186FF"))
+            fillSaturatedColors(accentColors, arrayOf("#00A5B7", "#FF6B2B", "#D8627E", "#A975AA"))
+        }
 
         private val sensorListener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
-                if (!shown || event.values.size < 3) return
+                if (!visible || event.values.size < 3) return
                 val nowNs = event.timestamp
-                val dt = if (lastSensorNs == 0L) 0.02f else ((nowNs - lastSensorNs) * 1e-9f).coerceIn(0.001f, 0.1f)
+                val dt = if (lastSensorNs == 0L) 0.02f
+                else ((nowNs - lastSensorNs) * 1e-9f).coerceIn(0.001f, 0.1f)
                 lastSensorNs = nowNs
 
-                // TYPE_GRAVITY đã lọc sẵn. Với accelerometer fallback, low-pass mạnh hơn một chút.
-                val a = if (event.sensor.type == Sensor.TYPE_GRAVITY) {
-                    1f - exp((-2f * PI.toFloat() * 7f * dt))
-                } else {
-                    1f - exp((-2f * PI.toFloat() * 3.5f * dt))
-                }
+                val hz = if (event.sensor.type == Sensor.TYPE_GRAVITY) 7f else 3.5f
+                val a = 1f - exp(-2f * PI.toFloat() * hz * dt)
                 if (!haveGravity) {
-                    gravity[0] = event.values[0]; gravity[1] = event.values[1]; gravity[2] = event.values[2]
+                    gravity[0] = event.values[0]
+                    gravity[1] = event.values[1]
+                    gravity[2] = event.values[2]
                     haveGravity = true
                 } else {
                     for (i in 0..2) gravity[i] += (event.values[i] - gravity[i]) * a
                 }
 
-                // Chỉ cần pitch/roll theo trọng lực. Không dùng compass/yaw để tránh rung và drift.
                 val gx = gravity[0]
                 val gy = gravity[1]
                 val gz = gravity[2]
-                val rawRoll = Math.toDegrees(atan2(gx.toDouble(), sqrt((gy * gy + gz * gz).toDouble()))).toFloat()
-                val rawPitch = Math.toDegrees(atan2((-gy).toDouble(), sqrt((gx * gx + gz * gz).toDouble()))).toFloat()
+                val rawRoll = Math.toDegrees(
+                    atan2(gx.toDouble(), sqrt((gy * gy + gz * gz).toDouble()))
+                ).toFloat()
+                val rawPitch = Math.toDegrees(
+                    atan2((-gy).toDouble(), sqrt((gx * gx + gz * gz).toDouble()))
+                ).toFloat()
 
-                targetRoll = (-rawRoll * G_TILT_GAIN).coerceIn(-G_TILT_MAX_DEG, G_TILT_MAX_DEG)
-                targetPitch = (-rawPitch * G_TILT_GAIN).coerceIn(-G_TILT_MAX_DEG, G_TILT_MAX_DEG)
-
-                val moved = abs(rawRoll - lastRawRoll) + abs(rawPitch - lastRawPitch)
-                if (moved > G_STILL_TILT_EPS_DEG) lastMotionAt = SystemClock.uptimeMillis()
-                lastRawRoll = rawRoll
-                lastRawPitch = rawPitch
+                targetTiltRoll = (-rawRoll * TILT_GAIN).coerceIn(-TILT_MAX_DEG, TILT_MAX_DEG)
+                targetTiltPitch = (-rawPitch * TILT_GAIN).coerceIn(-TILT_MAX_DEG, TILT_MAX_DEG)
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
         }
 
-        private val loop = object : Runnable {
+        private val frameLoop = object : Runnable {
             override fun run() {
-                val t0 = SystemClock.uptimeMillis()
-                drawFrame(t0)
-                if (shown) {
-                    // Khi người dùng đang điều khiển vật thể, ưu tiên độ trễ thấp / chuyển động mượt.
-                    // Giữ 60fps xuyên suốt cả pha quán tính; Xperia Home đôi khi chỉ gửi offset
-                    // nên coi offset vừa thay đổi trong 180ms là một gesture đang diễn ra.
-                    val interactionActive = touching ||
-                        abs(yawVel) >= G_INERTIA_STOP_DPS ||
-                        abs(pitchVel) >= G_INERTIA_STOP_DPS ||
-                        (t0 - lastOffsetAt in 0..180L)
-                    val fps = when {
-                        interactionActive -> G_FPS_INTERACTION
-                        pm.isPowerSaveMode -> G_FPS_SAVER
-                        else -> G_FPS
-                    }
-                    handler.postDelayed(this, max(1L, 1000L / fps - (SystemClock.uptimeMillis() - t0)))
+                val frameStart = SystemClock.uptimeMillis()
+                drawFrame(frameStart)
+                if (!visible) return
+
+                val interactionActive = touching ||
+                    abs(yawVelocity) >= INERTIA_STOP_DPS ||
+                    abs(pitchVelocity) >= INERTIA_STOP_DPS ||
+                    (frameStart - lastOffsetAt in 0..180L)
+                val fps = when {
+                    interactionActive -> FPS_INTERACTION
+                    powerManager.isPowerSaveMode -> FPS_SAVER
+                    else -> FPS_NORMAL
                 }
-            }
-        }
-
-        init {
-            fillColors(coreArr, listOf("#00B95C", "#FFCC00", "#FF4641", "#3186FF"))
-            fillColors(accentArr, listOf("#00A5B7", "#FF6B2B", "#D8627E", "#A975AA"))
-        }
-
-        private fun fillColors(dst: FloatArray, hex: List<String>) {
-            hex.forEachIndexed { i, s ->
-                val c = Color.parseColor(s)
-                dst[i * 3] = Color.red(c) / 255f
-                dst[i * 3 + 1] = Color.green(c) / 255f
-                dst[i * 3 + 2] = Color.blue(c) / 255f
+                val spent = SystemClock.uptimeMillis() - frameStart
+                handler.postDelayed(this, max(1L, 1000L / fps - spent))
             }
         }
 
@@ -301,153 +316,113 @@ class GeminiWallpaperService : WallpaperService() {
 
         override fun onSurfaceCreated(holder: SurfaceHolder) {
             super.onSurfaceCreated(holder)
-            if (initEGL(holder)) glReady = initGL()
+            if (initEgl(holder)) glReady = initGl()
         }
 
         override fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
             super.onSurfaceChanged(holder, format, width, height)
-            w = width
-            h = height
-            val aspect = w.toFloat() / h.toFloat()
-            // vừa khít chiều ngang màn hình dọc
-            camZ = max(240f, 170f / (0.767f * aspect))
-            Matrix.perspectiveM(proj, 0, 75f, aspect, 0.1f, 2000f)
+            widthPx = width
+            heightPx = height
+            if (height <= 0) return
+            val aspect = width.toFloat() / height.toFloat()
+            cameraZ = max(240f, 170f / (0.767f * aspect))
+            Matrix.perspectiveM(projection, 0, 75f, aspect, 0.1f, 2000f)
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
-            shown = visible
-            handler.removeCallbacks(loop)
+            this.visible = visible
+            handler.removeCallbacks(frameLoop)
             if (visible) {
                 val now = SystemClock.uptimeMillis()
-                startAt = now
-                lastT = now
-                lastWaveAt = now
-                lastMotionAt = now
-                registerSensors()
-                handler.post(loop)
+                shownAtMs = now
+                lastFrameMs = now
+                visibleAnimSeconds = 0f
+                entranceScale = 0f
+                morphPhase = (-PI / 2.0).toFloat()
+                idleTime = 0f
+                registerSensor()
+                handler.post(frameLoop)
             } else {
-                unregisterSensors()
-                velocityTracker?.recycle()
-                velocityTracker = null
+                unregisterSensor()
+                recycleVelocityTracker()
                 touching = false
             }
         }
 
-        private fun registerSensors() {
-            if (!sensorRegistered && gravitySensor != null) {
-                // GAME delay ~20 ms: đủ mượt ở 30 fps nhưng không ép sensor chạy quá nhanh.
-                sensorRegistered = sensorManager.registerListener(
-                    sensorListener, gravitySensor, SensorManager.SENSOR_DELAY_GAME
-                )
-                lastSensorNs = 0L
-            }
-        }
-
-        private fun unregisterSensors() {
-            if (sensorRegistered) sensorManager.unregisterListener(sensorListener)
-            sensorRegistered = false
-            lastSensorNs = 0L
-        }
-
         override fun onSurfaceDestroyed(holder: SurfaceHolder) {
-            shown = false
-            handler.removeCallbacks(loop)
-            unregisterSensors()
-            releaseGL()
+            visible = false
+            handler.removeCallbacks(frameLoop)
+            unregisterSensor()
+            recycleVelocityTracker()
+            releaseGl()
             super.onSurfaceDestroyed(holder)
         }
 
         override fun onDestroy() {
-            shown = false
-            handler.removeCallbacks(loop)
-            unregisterSensors()
-            velocityTracker?.recycle()
-            velocityTracker = null
-            releaseGL()
+            visible = false
+            handler.removeCallbacks(frameLoop)
+            unregisterSensor()
+            recycleVelocityTracker()
+            releaseGl()
             super.onDestroy()
         }
 
-        // Orbit/trackball nhẹ: mỗi delta được nhân vào orientation hiện tại.
-        // Xoay theo local axes giúp kéo xuyên qua cực vẫn liên tục và kéo chéo tạo cảm giác 3D tự nhiên.
-        private fun applyOrbitDelta(yawDeg: Float, pitchDeg: Float) {
-            if (yawDeg == 0f && pitchDeg == 0f) return
-            if (yawDeg != 0f) Matrix.rotateM(userRotation, 0, yawDeg, 0f, 1f, 0f)
-            if (pitchDeg != 0f) Matrix.rotateM(userRotation, 0, pitchDeg, 1f, 0f, 0f)
-        }
-
-        // Vuốt → xoay trực tiếp; thả → tiếp tục theo quán tính rồi hãm dần.
-        // Tap ngắn vẫn giữ hành vi bắn sóng đổi màu.
         override fun onTouchEvent(event: MotionEvent) {
-            velocityTracker?.addMovement(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    velocityTracker?.recycle()
+                    recycleVelocityTracker()
                     velocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
                     touching = true
-                    downX = event.x
-                    downY = event.y
+                    interactionMode = true
+                    returnForce = AUTO_RETURN_FORCE
                     lastTouchX = event.x
                     lastTouchY = event.y
-                    dragDistance = 0f
-                    yawVel = 0f
-                    pitchVel = 0f
-                    lastMotionAt = SystemClock.uptimeMillis()
+                    yawVelocity = 0f
+                    pitchVelocity = 0f
+
+                    // JS dùng pointerdown: đổi state và bắn wave ngay cả khi sau đó là drag.
+                    triggerWave(force = true)
                 }
+
                 MotionEvent.ACTION_MOVE -> {
+                    velocityTracker?.addMovement(event)
                     val dx = event.x - lastTouchX
                     val dy = event.y - lastTouchY
-                    dragDistance += sqrt(dx * dx + dy * dy)
-                    val sx = max(1, w).toFloat()
-                    val sy = max(1, h).toFloat()
-                    applyOrbitDelta(
-                        dx / sx * G_DRAG_DEG_PER_SCREEN,
-                        dy / sy * G_DRAG_DEG_PER_SCREEN
-                    )
+                    userYaw += dx / max(1, widthPx).toFloat() * DRAG_DEG_PER_SCREEN
+                    userPitch += dy / max(1, heightPx).toFloat() * DRAG_DEG_PER_SCREEN
+                    userPitch = userPitch.coerceIn(-89f, 89f)
                     lastTouchX = event.x
                     lastTouchY = event.y
-                    lastMotionAt = SystemClock.uptimeMillis()
                 }
+
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val wasTap = dragDistance < touchSlop &&
-                        abs(event.x - downX) < touchSlop && abs(event.y - downY) < touchSlop
-                    if (event.actionMasked == MotionEvent.ACTION_UP && wasTap) {
-                        triggerWave(SystemClock.uptimeMillis())
-                    } else {
-                        velocityTracker?.computeCurrentVelocity(1000)
-                        val sx = max(1, w).toFloat()
-                        val sy = max(1, h).toFloat()
-                        yawVel = ((velocityTracker?.xVelocity ?: 0f) / sx * G_DRAG_DEG_PER_SCREEN)
-                            .coerceIn(-360f, 360f)
-                        pitchVel = ((velocityTracker?.yVelocity ?: 0f) / sy * G_DRAG_DEG_PER_SCREEN)
-                            .coerceIn(-240f, 240f)
-                    }
+                    velocityTracker?.addMovement(event)
+                    velocityTracker?.computeCurrentVelocity(1000)
+                    val sx = max(1, widthPx).toFloat()
+                    val sy = max(1, heightPx).toFloat()
+                    yawVelocity = ((velocityTracker?.xVelocity ?: 0f) / sx * DRAG_DEG_PER_SCREEN)
+                        .coerceIn(-360f, 360f)
+                    pitchVelocity = ((velocityTracker?.yVelocity ?: 0f) / sy * DRAG_DEG_PER_SCREEN)
+                        .coerceIn(-240f, 240f)
                     touching = false
-                    velocityTracker?.recycle()
-                    velocityTracker = null
-                    lastMotionAt = SystemClock.uptimeMillis()
+                    recycleVelocityTracker()
                 }
             }
             super.onTouchEvent(event)
         }
 
-        // Xperia Home thường giữ gesture vuốt trang cho launcher. Offset là fallback để wallpaper
-        // vẫn phản ứng khi người dùng lướt Home, kể cả lúc không nhận được ACTION_MOVE trực tiếp.
         override fun onOffsetsChanged(
-            xOffset: Float, yOffset: Float, xOffsetStep: Float, yOffsetStep: Float,
-            xPixelOffset: Int, yPixelOffset: Int
+            xOffset: Float,
+            yOffset: Float,
+            xOffsetStep: Float,
+            yOffsetStep: Float,
+            xPixelOffset: Int,
+            yPixelOffset: Int
         ) {
             val now = SystemClock.uptimeMillis()
             if (!touching && lastOffsetX >= 0f) {
                 val dx = xOffset - lastOffsetX
-                if (abs(dx) < 0.5f) { // bỏ qua wrap 0 ↔ 1 ở launcher vòng
-                    offsetYaw += dx * 75f
-                    if (abs(dx) > 0.0005f) {
-                        val dt = ((now - lastOffsetAt) / 1000f).coerceIn(0.008f, 0.12f)
-                        val v = dx / dt * 75f
-                        yawVel = (yawVel * 0.55f + v * 0.45f).coerceIn(-300f, 300f)
-                        lastMotionAt = now
-                    }
-                }
+                if (abs(dx) < 0.5f) launcherYaw += dx * 45f
             }
             lastOffsetX = xOffset
             lastOffsetAt = now
@@ -455,264 +430,399 @@ class GeminiWallpaperService : WallpaperService() {
         }
 
         override fun onCommand(
-            action: String?, x: Int, y: Int, z: Int, extras: Bundle?, resultRequested: Boolean
+            action: String?,
+            x: Int,
+            y: Int,
+            z: Int,
+            extras: Bundle?,
+            resultRequested: Boolean
         ): Bundle? {
-            if (action == WallpaperManager.COMMAND_TAP) triggerWave(SystemClock.uptimeMillis())
+            // Một số launcher gửi COMMAND_TAP thay vì MotionEvent. Tránh double-wave nếu vừa ACTION_DOWN.
+            if (action == WallpaperManager.COMMAND_TAP && !touching) triggerWave(force = false)
             return super.onCommand(action, x, y, z, extras, resultRequested)
         }
 
-        private fun triggerWave(now: Long) {
-            if (now - lastWaveAt < 300) return
-            lastWaveAt = now
-            stateIndex = (stateIndex + 1) % 4
-            waves.add(GWave(0f, stateIndex))
-            if (waves.size > 4) waves.removeAt(0)
+        private fun triggerWave(force: Boolean = false) {
+            val now = SystemClock.uptimeMillis()
+            if (!force && now - lastWaveAtMs < 200L) return
+            lastWaveAtMs = now
+            selectedState = (selectedState + 1) % 4
+            waves.add(Wave(0f, selectedState))
         }
 
-        // ── EGL / GL ──
-        private fun initEGL(holder: SurfaceHolder): Boolean {
-            dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-            if (dpy == EGL14.EGL_NO_DISPLAY) return false
-            val ver = IntArray(2)
-            if (!EGL14.eglInitialize(dpy, ver, 0, ver, 1)) return false
-            val attr = intArrayOf(
+        private fun updateWaves(dt: Float) {
+            for (wave in waves) wave.radius += dt * WAVE_SPEED
+
+            // JS chỉ commit C theo thứ tự queue khi wave đầu tiên đã phủ hết object.
+            while (waves.isNotEmpty() && waves[0].radius >= WAVE_END_RADIUS) {
+                baseState = waves[0].stateIndex
+                waves.removeAt(0)
+            }
+        }
+
+        private fun updateInteraction(dt: Float) {
+            if (!touching) {
+                if (abs(yawVelocity) > 0f || abs(pitchVelocity) > 0f) {
+                    userYaw += yawVelocity * dt
+                    userPitch = (userPitch + pitchVelocity * dt).coerceIn(-89f, 89f)
+                    val damp = exp(-INERTIA_FRICTION * dt)
+                    yawVelocity *= damp
+                    pitchVelocity *= damp
+                    if (abs(yawVelocity) < INERTIA_STOP_DPS) yawVelocity = 0f
+                    if (abs(pitchVelocity) < INERTIA_STOP_DPS) pitchVelocity = 0f
+                }
+
+                // Tương đương ý đồ autoReturnToFront của JS: sau OrbitControls, camera trở lại mặt trước.
+                if (interactionMode && yawVelocity == 0f && pitchVelocity == 0f) {
+                    val yawError = returnYawError(userYaw)
+                    val k = 1f - exp(-returnForce * 5f * dt)
+                    userYaw += yawError * k
+                    userPitch += (0f - userPitch) * k
+
+                    if (abs(yawError) < 5f && abs(userPitch) < 5f) {
+                        returnForce = max(0f, returnForce - dt * AUTO_RETURN_FORCE_DECAY)
+                    }
+                    if (returnForce <= 0.001f) {
+                        val n = normalizeDegrees(userYaw)
+                        userYaw = if (abs(n) <= 90f) 0f else if (n >= 0f) 180f else -180f
+                        userPitch = 0f
+                        interactionMode = false
+                    }
+                }
+            }
+        }
+
+        private fun drawFrame(nowMs: Long) {
+            if (!glReady || widthPx <= 0 || heightPx <= 0) return
+            try {
+                val dt = ((nowMs - lastFrameMs) / 1000f).coerceIn(0f, 0.1f)
+                lastFrameMs = nowMs
+
+                val delayPassed = nowMs - shownAtMs >= ENTRANCE_DELAY_MS
+                if (delayPassed) {
+                    visibleAnimSeconds += dt
+                    entranceScale += (1f - entranceScale) * (dt * ENTRANCE_GROW_SPEED).coerceIn(0f, 1f)
+                }
+
+                // gemini.js chỉ bắt đầu morph + idle rotation sau entranceLingerSeconds.
+                if (delayPassed && visibleAnimSeconds > ENTRANCE_LINGER_SECONDS) {
+                    if (!interactionMode) idleTime += dt
+                    val speed = (0.15f + (
+                        (3.5f + SPARK_CURVE_N) / 2f +
+                            (3.5f - SPARK_CURVE_N) / 2f * kotlin.math.sin(morphPhase) -
+                            (SPARK_CURVE_N - 0.1f)
+                        ).pow(2) * 0.15f) * 1.2f
+                    morphPhase += dt * speed
+                }
+
+                scatter += (targetScatter - scatter) * 0.1f
+                updateWaves(dt)
+                updateInteraction(dt)
+
+                val tiltA = 1f - exp(-2f * PI.toFloat() * TILT_SMOOTH_HZ * dt)
+                tiltPitch += (targetTiltPitch - tiltPitch) * tiltA
+                tiltRoll += (targetTiltRoll - tiltRoll) * tiltA
+
+                if (!EGL14.eglMakeCurrent(display, surface, surface, context)) return
+                GLES20.glViewport(0, 0, widthPx, heightPx)
+                GLES20.glClearColor(0f, 0f, 0f, 1f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+                if (delayPassed && entranceScale > 0.0001f) {
+                    buildModelView()
+                    val shape = (3.5f + SPARK_CURVE_N) / 2f +
+                        (3.5f - SPARK_CURVE_N) / 2f * kotlin.math.sin(morphPhase)
+                    fillWaveUniforms()
+
+                    GLES20.glUseProgram(program)
+                    GLES20.glUniformMatrix4fv(locMV, 1, false, modelView, 0)
+                    GLES20.glUniformMatrix4fv(locProj, 1, false, projection, 0)
+                    GLES20.glUniform1f(locShape, shape)
+                    GLES20.glUniform1f(locScatter, scatter)
+                    GLES20.glUniform1f(locBaseState, baseState.toFloat())
+                    GLES20.glUniform1f(locPixelRatio, pixelRatio)
+                    GLES20.glUniform4fv(locWave, MAX_GPU_WAVES, waveUniforms, 0)
+                    GLES20.glUniform3fv(locCore, 4, coreColors, 0)
+                    GLES20.glUniform3fv(locAccent, 4, accentColors, 0)
+
+                    GLES20.glEnable(GLES20.GL_BLEND)
+                    GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE)
+                    GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+
+                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
+                    GLES20.glEnableVertexAttribArray(locP)
+                    GLES20.glVertexAttribPointer(locP, 4, GLES20.GL_FLOAT, false, 16, 0)
+                    GLES20.glDrawArrays(GLES20.GL_POINTS, 0, PARTICLE_COUNT)
+                    GLES20.glDisableVertexAttribArray(locP)
+                }
+
+                EGL14.eglSwapBuffers(display, surface)
+            } catch (_: Exception) {
+                // Wallpaper service không được crash chỉ vì một frame/EGL transient lỗi.
+            }
+        }
+
+        private fun buildModelView() {
+            Matrix.setIdentityM(modelView, 0)
+            Matrix.translateM(modelView, 0, 0f, 0f, -cameraZ)
+
+            // Android parallax/background-page layer.
+            Matrix.rotateM(modelView, 0, tiltPitch, 1f, 0f, 0f)
+            Matrix.rotateM(modelView, 0, tiltRoll + launcherYaw, 0f, 1f, 0f)
+
+            // OrbitControls-equivalent user control.
+            Matrix.rotateM(modelView, 0, userPitch, 1f, 0f, 0f)
+            Matrix.rotateM(modelView, 0, userYaw, 0f, 1f, 0f)
+
+            // gemini.js idle object rotation:
+            // r = I*.22; x=sin(2r)^3*.85, y=sin(r)^3*1.15, z=sin(r)^3*-.65 (radians).
+            if (!interactionMode) {
+                val r = idleTime * 0.22f
+                val sx = kotlin.math.sin(r * 2f).pow(3) * 0.85f
+                val sy = kotlin.math.sin(r).pow(3) * 1.15f
+                val sz = kotlin.math.sin(r).pow(3) * -0.65f
+                val radToDeg = (180f / PI.toFloat())
+                Matrix.rotateM(modelView, 0, sx * radToDeg, 1f, 0f, 0f)
+                Matrix.rotateM(modelView, 0, sy * radToDeg, 0f, 1f, 0f)
+                Matrix.rotateM(modelView, 0, sz * radToDeg, 0f, 0f, 1f)
+            }
+
+            Matrix.scaleM(modelView, 0, entranceScale, entranceScale, entranceScale)
+        }
+
+        private fun fillWaveUniforms() {
+            java.util.Arrays.fill(waveUniforms, 0f)
+            // Nếu queue > GPU slots, giữ các wave mới nhất; baseState vẫn commit theo queue CPU.
+            val start = max(0, waves.size - MAX_GPU_WAVES)
+            var slot = 0
+            for (i in start until waves.size) {
+                val wave = waves[i]
+                val o = slot * 4
+                waveUniforms[o] = wave.radius
+                waveUniforms[o + 1] = wave.stateIndex.toFloat()
+                waveUniforms[o + 2] = WAVE_WIDTH
+                waveUniforms[o + 3] = 1f
+                slot++
+            }
+        }
+
+        private fun initEgl(holder: SurfaceHolder): Boolean {
+            display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
+            if (display == EGL14.EGL_NO_DISPLAY) return false
+            val version = IntArray(2)
+            if (!EGL14.eglInitialize(display, version, 0, version, 1)) return false
+
+            val attrs = intArrayOf(
                 EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
                 EGL14.EGL_NONE
             )
-            val cfgs = arrayOfNulls<EGLConfig>(1)
-            val n = IntArray(1)
-            if (!EGL14.eglChooseConfig(dpy, attr, 0, cfgs, 0, 1, n, 0) || n[0] == 0) return false
-            val cfg = cfgs[0] ?: return false
-            ctx = EGL14.eglCreateContext(
-                dpy, cfg, EGL14.EGL_NO_CONTEXT,
-                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0
+            val configs = arrayOfNulls<EGLConfig>(1)
+            val count = IntArray(1)
+            if (!EGL14.eglChooseConfig(display, attrs, 0, configs, 0, 1, count, 0) || count[0] == 0) return false
+            val config = configs[0] ?: return false
+
+            context = EGL14.eglCreateContext(
+                display,
+                config,
+                EGL14.EGL_NO_CONTEXT,
+                intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE),
+                0
             )
-            surf = EGL14.eglCreateWindowSurface(dpy, cfg, holder.surface, intArrayOf(EGL14.EGL_NONE), 0)
-            if (ctx == EGL14.EGL_NO_CONTEXT || surf == EGL14.EGL_NO_SURFACE) return false
-            return EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
+            surface = EGL14.eglCreateWindowSurface(
+                display,
+                config,
+                holder.surface,
+                intArrayOf(EGL14.EGL_NONE),
+                0
+            )
+            if (context == EGL14.EGL_NO_CONTEXT || surface == EGL14.EGL_NO_SURFACE) return false
+            return EGL14.eglMakeCurrent(display, surface, surface, context)
         }
 
-        private fun compile(type: Int, src: String): Int {
-            val s = GLES20.glCreateShader(type)
-            GLES20.glShaderSource(s, src)
-            GLES20.glCompileShader(s)
-            val st = IntArray(1)
-            GLES20.glGetShaderiv(s, GLES20.GL_COMPILE_STATUS, st, 0)
-            if (st[0] == 0) {
-                GLES20.glDeleteShader(s)
-                return 0
-            }
-            return s
-        }
-
-        private fun initGL(): Boolean {
-            val vs = compile(GLES20.GL_VERTEX_SHADER, VERT)
-            val fs = compile(GLES20.GL_FRAGMENT_SHADER, FRAG)
+        private fun initGl(): Boolean {
+            val vs = compileShader(GLES20.GL_VERTEX_SHADER, VERTEX_SHADER)
+            val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, FRAGMENT_SHADER)
             if (vs == 0 || fs == 0) return false
-            prog = GLES20.glCreateProgram()
-            GLES20.glAttachShader(prog, vs)
-            GLES20.glAttachShader(prog, fs)
-            GLES20.glLinkProgram(prog)
-            val st = IntArray(1)
-            GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, st, 0)
-            if (st[0] == 0) return false
 
-            locP = GLES20.glGetAttribLocation(prog, "aP")
-            locSym = GLES20.glGetAttribLocation(prog, "aSym")
-            locMV = GLES20.glGetUniformLocation(prog, "uMV")
-            locProj = GLES20.glGetUniformLocation(prog, "uProj")
-            locShape = GLES20.glGetUniformLocation(prog, "uShape")
-            locState = GLES20.glGetUniformLocation(prog, "uState")
-            locPR = GLES20.glGetUniformLocation(prog, "uPR")
-            locWave = GLES20.glGetUniformLocation(prog, "uWave")
-            locCore = GLES20.glGetUniformLocation(prog, "uCore")
-            locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
-            locTex = GLES20.glGetUniformLocation(prog, "uTex")
+            program = GLES20.glCreateProgram()
+            GLES20.glAttachShader(program, vs)
+            GLES20.glAttachShader(program, fs)
+            GLES20.glLinkProgram(program)
+            GLES20.glDeleteShader(vs)
+            GLES20.glDeleteShader(fs)
 
-            val symCount = buildAtlas()
+            val linked = IntArray(1)
+            GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0)
+            if (linked[0] == 0) return false
 
-            // dữ liệu hạt: angle, rad, zOffset, speed, symbol (5 float / hạt)
-            val buf = ByteBuffer.allocateDirect(G_PARTICLES * 5 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-            for (i in 0 until G_PARTICLES) {
-                val r1 = Random.nextFloat()
-                val r5 = r1 * r1 * r1 * r1 * r1
-                buf.put((Random.nextFloat() * 2f * PI).toFloat())
-                buf.put(r5)
-                buf.put(Random.nextFloat() + Random.nextFloat() + Random.nextFloat() - 1.5f)
-                buf.put(0.8f + Random.nextFloat() * 1.2f)
-                buf.put(Random.nextInt(symCount).toFloat())
+            locP = GLES20.glGetAttribLocation(program, "aP")
+            locMV = GLES20.glGetUniformLocation(program, "uMV")
+            locProj = GLES20.glGetUniformLocation(program, "uProj")
+            locShape = GLES20.glGetUniformLocation(program, "uShape")
+            locScatter = GLES20.glGetUniformLocation(program, "uScatter")
+            locBaseState = GLES20.glGetUniformLocation(program, "uBaseState")
+            locPixelRatio = GLES20.glGetUniformLocation(program, "uPixelRatio")
+            locWave = GLES20.glGetUniformLocation(program, "uWave[0]")
+            locCore = GLES20.glGetUniformLocation(program, "uCore[0]")
+            locAccent = GLES20.glGetUniformLocation(program, "uAccent[0]")
+
+            val data = ByteBuffer.allocateDirect(PARTICLE_COUNT * 4 * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+            repeat(PARTICLE_COUNT) {
+                val r = Random.nextFloat()
+                data.put(Random.nextFloat() * 2f * PI.toFloat())
+                data.put(r * r * r * r * r)
+                data.put(Random.nextFloat() + Random.nextFloat() + Random.nextFloat() - 1.5f)
+                data.put(0.8f + Random.nextFloat() * 1.2f)
             }
-            buf.position(0)
+            data.position(0)
+
             val ids = IntArray(1)
             GLES20.glGenBuffers(1, ids, 0)
             vbo = ids[0]
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_PARTICLES * 5 * 4, buf, GLES20.GL_STATIC_DRAW)
-            return true
+            GLES20.glBufferData(
+                GLES20.GL_ARRAY_BUFFER,
+                PARTICLE_COUNT * 4 * 4,
+                data,
+                GLES20.GL_STATIC_DRAW
+            )
+            return vbo != 0
         }
 
-        // atlas ký tự: 16 ô 64px, chỉ dùng ký tự máy có font; thiếu thì dùng bộ dự phòng
-        private fun buildAtlas(): Int {
-            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
-                textSize = 42f
-                color = Color.WHITE
-                textAlign = Paint.Align.CENTER
+        private fun compileShader(type: Int, source: String): Int {
+            val shader = GLES20.glCreateShader(type)
+            GLES20.glShaderSource(shader, source)
+            GLES20.glCompileShader(shader)
+            val ok = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, ok, 0)
+            if (ok[0] == 0) {
+                GLES20.glDeleteShader(shader)
+                return 0
             }
-            var syms = G_SYMBOLS.map { it.toString() }.filter { p.hasGlyph(it) }
-            if (syms.isEmpty()) syms = G_SYMBOLS_FALLBACK.map { it.toString() }.filter { p.hasGlyph(it) }
-            if (syms.isEmpty()) syms = listOf("+")
-            syms = syms.take(16)
-
-            val bmp = Bitmap.createBitmap(1024, 64, Bitmap.Config.ARGB_8888)
-            val cv = Canvas(bmp)
-            val fm = p.fontMetrics
-            val baseY = 32f - (fm.ascent + fm.descent) / 2f
-            syms.forEachIndexed { i, s -> cv.drawText(s, i * 64f + 32f, baseY, p) }
-
-            val ids = IntArray(1)
-            GLES20.glGenTextures(1, ids, 0)
-            tex = ids[0]
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
-            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
-            GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            bmp.recycle()
-            return syms.size
+            return shader
         }
 
-        private fun releaseGL() {
+        private fun releaseGl() {
             try {
-                if (dpy != EGL14.EGL_NO_DISPLAY) {
-                    if (glReady && ctx != EGL14.EGL_NO_CONTEXT && surf != EGL14.EGL_NO_SURFACE) {
-                        EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
-                        GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
-                        GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
-                        GLES20.glDeleteProgram(prog)
+                if (display != EGL14.EGL_NO_DISPLAY) {
+                    if (context != EGL14.EGL_NO_CONTEXT && surface != EGL14.EGL_NO_SURFACE) {
+                        EGL14.eglMakeCurrent(display, surface, surface, context)
+                        if (vbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
+                        if (program != 0) GLES20.glDeleteProgram(program)
                     }
-                    EGL14.eglMakeCurrent(dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                    if (surf != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(dpy, surf)
-                    if (ctx != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(dpy, ctx)
+                    EGL14.eglMakeCurrent(
+                        display,
+                        EGL14.EGL_NO_SURFACE,
+                        EGL14.EGL_NO_SURFACE,
+                        EGL14.EGL_NO_CONTEXT
+                    )
+                    if (surface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, surface)
+                    if (context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, context)
+                    EGL14.eglTerminate(display)
                 }
-            } catch (e: Exception) {
-                // bỏ qua
+            } catch (_: Exception) {
             }
-            surf = EGL14.EGL_NO_SURFACE
-            ctx = EGL14.EGL_NO_CONTEXT
+            display = EGL14.EGL_NO_DISPLAY
+            surface = EGL14.EGL_NO_SURFACE
+            context = EGL14.EGL_NO_CONTEXT
+            program = 0
+            vbo = 0
             glReady = false
         }
 
-        // ── khung hình ──
-        private fun drawFrame(now: Long) {
-            if (!glReady || w == 0) return
-            try {
-                val dt = ((now - lastT) / 1000f).coerceIn(0f, 0.1f)
-                lastT = now
-                animTime += dt
-                morph += dt * 0.5f
-
-                // Tilt low-pass ở nhịp render để không phụ thuộc tần số sensor.
-                val tiltA = 1f - exp((-2f * PI.toFloat() * G_TILT_SMOOTH_HZ * dt))
-                tiltPitch += (targetPitch - tiltPitch) * tiltA
-                tiltRoll += (targetRoll - tiltRoll) * tiltA
-
-                // Quán tính gesture: tiếp tục xoay trên chính orientation hiện tại rồi hãm dần.
-                // Vì tích lũy bằng ma trận nên không có điểm gãy ±90° như Euler pitch/yaw.
-                if (!touching) {
-                    if (yawVel != 0f || pitchVel != 0f) {
-                        applyOrbitDelta(yawVel * dt, pitchVel * dt)
-                    }
-                    val damp = exp(-G_INERTIA_FRICTION * dt)
-                    yawVel *= damp
-                    pitchVel *= damp
-                    if (abs(yawVel) < G_INERTIA_STOP_DPS) yawVel = 0f
-                    if (abs(pitchVel) < G_INERTIA_STOP_DPS) pitchVel = 0f
-                }
-
-                val inertial = abs(yawVel) + abs(pitchVel) > G_INERTIA_STOP_DPS * 1.5f
-                val autoActive = !touching && !inertial && now - lastMotionAt >= G_AUTO_DELAY_MS
-                if (autoActive) applyOrbitDelta(G_AUTO_YAW_DPS * dt, 0f)
-
-                if (G_AUTO_WAVE_MS > 0 && now - lastWaveAt > G_AUTO_WAVE_MS) triggerWave(now)
-
-                val iter = waves.iterator()
-                while (iter.hasNext()) {
-                    val wv = iter.next()
-                    wv.radius += dt * 650f
-                    if (wv.radius >= 1200f) iter.remove()
-                }
-
-                // xuất hiện dần: trễ 0.5s rồi lerp 5%/16ms như bản gốc
-                val te = (now - startAt) / 1000f - 0.5f
-                val scale = if (te <= 0f) 0f else 1f - exp(-3.2f * te)
-
-                if (!EGL14.eglMakeCurrent(dpy, surf, surf, ctx)) return
-                GLES20.glViewport(0, 0, w, h)
-                GLES20.glClearColor(0f, 0f, 0f, 1f)
-                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
-                if (scale > 0.001f) {
-                    // Hologram + free orbit:
-                    // 1) tilt/launcher offset là lớp tham chiếu theo thiết bị / Home;
-                    // 2) userRotation là orientation 3D tự do do vuốt + quán tính tích lũy.
-                    Matrix.setIdentityM(mv, 0)
-                    Matrix.translateM(mv, 0, 0f, 0f, -camZ)
-                    Matrix.rotateM(mv, 0, tiltPitch, 1f, 0f, 0f)
-                    Matrix.rotateM(mv, 0, tiltRoll + offsetYaw, 0f, 1f, 0f)
-                    Matrix.rotateM(mv, 0, -tiltRoll * 0.20f, 0f, 0f, 1f)
-                    Matrix.multiplyMM(rotTmp, 0, mv, 0, userRotation, 0)
-                    System.arraycopy(rotTmp, 0, mv, 0, 16)
-                    Matrix.scaleM(mv, 0, scale, scale, scale)
-
-                    val shape = (3.5f + G_SPARK_N) / 2f +
-                        ((3.5f - G_SPARK_N) / 2f) * kotlin.math.sin(morph)
-
-                    java.util.Arrays.fill(waveArr, 0f)
-                    for (i in 0 until waves.size) {
-                        waveArr[i * 4] = waves[i].radius
-                        waveArr[i * 4 + 1] = waves[i].state.toFloat()
-                        waveArr[i * 4 + 2] = 80f
-                        waveArr[i * 4 + 3] = 1f
-                    }
-
-                    GLES20.glUseProgram(prog)
-                    GLES20.glUniformMatrix4fv(locMV, 1, false, mv, 0)
-                    GLES20.glUniformMatrix4fv(locProj, 1, false, proj, 0)
-                    GLES20.glUniform1f(locShape, shape)
-                    GLES20.glUniform1f(locState, stateIndex.toFloat())
-                    GLES20.glUniform1f(locPR, pixelRatio * G_SIZE_BOOST)
-                    GLES20.glUniform4fv(locWave, 4, waveArr, 0)
-                    GLES20.glUniform3fv(locCore, 4, coreArr, 0)
-                    GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
-
-                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
-                    GLES20.glUniform1i(locTex, 0)
-
-                    GLES20.glEnable(GLES20.GL_BLEND)
-                    GLES20.glBlendFuncSeparate(
-                        GLES20.GL_SRC_ALPHA, GLES20.GL_ONE, GLES20.GL_ZERO, GLES20.GL_ONE
-                    )
-
-                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
-                    GLES20.glEnableVertexAttribArray(locP)
-                    GLES20.glVertexAttribPointer(locP, 4, GLES20.GL_FLOAT, false, 20, 0)
-                    GLES20.glEnableVertexAttribArray(locSym)
-                    GLES20.glVertexAttribPointer(locSym, 1, GLES20.GL_FLOAT, false, 20, 16)
-                    GLES20.glDrawArrays(GLES20.GL_POINTS, 0, G_PARTICLES)
-                    GLES20.glDisableVertexAttribArray(locP)
-                    GLES20.glDisableVertexAttribArray(locSym)
-                }
-
-                EGL14.eglSwapBuffers(dpy, surf)
-            } catch (e: Exception) {
-                // bỏ qua khung lỗi
+        private fun registerSensor() {
+            if (!sensorRegistered && gravitySensor != null) {
+                sensorRegistered = sensorManager.registerListener(
+                    sensorListener,
+                    gravitySensor,
+                    SensorManager.SENSOR_DELAY_GAME
+                )
+                lastSensorNs = 0L
             }
+        }
+
+        private fun unregisterSensor() {
+            if (sensorRegistered) sensorManager.unregisterListener(sensorListener)
+            sensorRegistered = false
+            lastSensorNs = 0L
+        }
+
+        private fun recycleVelocityTracker() {
+            velocityTracker?.recycle()
+            velocityTracker = null
+        }
+
+        private fun fillSaturatedColors(dst: FloatArray, colors: Array<String>) {
+            colors.forEachIndexed { index, value ->
+                val c = Color.parseColor(value)
+                val rgb = saturateHsl(
+                    Color.red(c) / 255f,
+                    Color.green(c) / 255f,
+                    Color.blue(c) / 255f,
+                    COLOR_SATURATION
+                )
+                dst[index * 3] = rgb[0]
+                dst[index * 3 + 1] = rgb[1]
+                dst[index * 3 + 2] = rgb[2]
+            }
+        }
+
+        // Equivalent to THREE.Color.getHSL(); setHSL(h, s * colorSaturation, l).
+        private fun saturateHsl(r: Float, g: Float, b: Float, multiplier: Float): FloatArray {
+            val maxC = max(r, max(g, b))
+            val minC = min(r, min(g, b))
+            val l = (maxC + minC) * 0.5f
+            if (maxC == minC) return floatArrayOf(l, l, l)
+
+            val d = maxC - minC
+            var s = if (l > 0.5f) d / (2f - maxC - minC) else d / (maxC + minC)
+            var h = when (maxC) {
+                r -> (g - b) / d + if (g < b) 6f else 0f
+                g -> (b - r) / d + 2f
+                else -> (r - g) / d + 4f
+            } / 6f
+            h = h - kotlin.math.floor(h)
+            s = (s * multiplier).coerceIn(0f, 1f)
+
+            if (s == 0f) return floatArrayOf(l, l, l)
+            val q = if (l < 0.5f) l * (1f + s) else l + s - l * s
+            val p = 2f * l - q
+            return floatArrayOf(
+                hueToRgb(p, q, h + 1f / 3f),
+                hueToRgb(p, q, h),
+                hueToRgb(p, q, h - 1f / 3f)
+            )
+        }
+
+        private fun hueToRgb(p: Float, q: Float, input: Float): Float {
+            var t = input
+            if (t < 0f) t += 1f
+            if (t > 1f) t -= 1f
+            return when {
+                t < 1f / 6f -> p + (q - p) * 6f * t
+                t < 1f / 2f -> q
+                t < 2f / 3f -> p + (q - p) * (2f / 3f - t) * 6f
+                else -> p
+            }
+        }
+
+        private fun normalizeDegrees(value: Float): Float {
+            var v = value % 360f
+            if (v > 180f) v -= 360f
+            if (v < -180f) v += 360f
+            return v
+        }
+
+        private fun returnYawError(value: Float): Float {
+            val n = normalizeDegrees(value)
+            val target = if (abs(n) <= 90f) 0f else if (n >= 0f) 180f else -180f
+            return normalizeDegrees(target - n)
         }
     }
 }
