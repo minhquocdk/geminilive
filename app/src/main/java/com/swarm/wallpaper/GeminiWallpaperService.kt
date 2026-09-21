@@ -237,7 +237,7 @@ class GeminiWallpaperService : WallpaperService() {
         private val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         private val gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
             ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        private val touchSlop = ViewConfiguration.get(this@Kascp3WallpaperService).scaledTouchSlop.toFloat()
+        private val touchSlop = ViewConfiguration.get(this@GeminiWallpaperService).scaledTouchSlop.toFloat()
         private val dpr: Float
             get() = min(resources.displayMetrics.density, K_MAX_DPR)
 
