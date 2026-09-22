@@ -30,7 +30,7 @@ import android.view.ViewConfiguration
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Calendar
-=======
+
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
