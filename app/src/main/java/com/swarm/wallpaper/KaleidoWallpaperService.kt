@@ -41,6 +41,13 @@ private const val G_PET_PARTICLES = 500   // số hạt tạo nên con pet
 private const val G_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
 
+// ── pool glyph cho pet (thuần ký tự: body + mắt + miệng đều là glyph) ──
+private const val PET_BODY_SYMBOLS  = "⌬❂❋✺☬⬢⎈⍟⊛✦✧◆"   // lúc tỉnh / dạo
+private const val PET_SLEEP_SYMBOLS = "☾◐◯◌◍○"           // khi ngủ
+private const val PET_PLAY_SYMBOLS  = "✺✹❋✵✦✧"           // khi mood cao
+private const val PET_EYE_SYMBOLS   = "•○●◉◕◔"           // mắt
+private const val PET_MOUTH_SYMBOLS = "‿◡ωᴗ"              // miệng
+
 private class KWave(var radius: Float, val state: Int)
 
 // ───────────────────────── SHADER ─────────────────────────
@@ -116,7 +123,7 @@ void main() {
 """
 
 // ───────────────────────── PET SHADER ─────────────────────────
-// Pet vẽ bằng 1 quad textured glyph lấy từ atlas ký tự có sẵn.
+// Pet vẽ bằng quad textured glyph — thuần ký tự, không có hình tròn solid.
 // Không dùng gl_PointSize vì nhiều GPU giới hạn point size ~64px.
 private const val PET_VERT = """
 attribute vec2 aQuad;     // x,y trong [-0.5, 0.5]
@@ -127,8 +134,7 @@ uniform vec2 uPetPos;
 uniform float uSize;
 uniform float uRot;
 uniform float uGlyphIdx;
-varying vec2 vUV;         // atlas UV (đã cộng glyphIdx)
-varying vec2 vUVRaw;      // uv 0..1 (dùng cho chế độ solid)
+varying vec2 vUV;
 
 void main() {
     float c = cos(uRot);
@@ -138,31 +144,19 @@ void main() {
     vec4 world = uMV * vec4(p + uPetPos, 0.0, 1.0);
     gl_Position = uProj * world;
     vUV = vec2((aUV.x + uGlyphIdx) / 16.0, aUV.y);
-    vUVRaw = aUV;
 }
 """
 
 private const val PET_FRAG = """
 precision mediump float;
 varying vec2 vUV;
-varying vec2 vUVRaw;
 uniform sampler2D uTex;
 uniform vec3 uColor;
-uniform float uUseTex;
 
 void main() {
-    if (uUseTex > 0.5) {
-        // chế độ glyph: tint màu lên ô atlas
-        vec4 t = texture2D(uTex, vUV);
-        if (t.a < 0.1) discard;
-        gl_FragColor = vec4(uColor, t.a);
-    } else {
-        // chế độ solid: hình tròn (dùng cho mắt / con ngươi)
-        vec2 c = vUVRaw - vec2(0.5);
-        float d2 = dot(c, c);
-        if (d2 > 0.25) discard;
-        gl_FragColor = vec4(uColor, 1.0 - d2 * 2.0);
-    }
+    vec4 t = texture2D(uTex, vUV);
+    if (t.a < 0.1) discard;
+    gl_FragColor = vec4(uColor, t.a);
 }
 """
 
@@ -201,6 +195,7 @@ class KaleidoWallpaperService : WallpaperService() {
         // pet (port từ aqua.html)
         private var petProg = 0
         private var petVbo = 0
+        private var petTex = 0
         private var petLocQuad = 0
         private var petLocUV = 0
         private var petLocMV = 0
@@ -209,11 +204,21 @@ class KaleidoWallpaperService : WallpaperService() {
         private var petLocSize = 0
         private var petLocRot = 0
         private var petLocGlyph = 0
-        private var petLocUseTex = 0
         private var petLocColor = 0
         private var petLocTex = 0
-        private var petGlyphIdx = 0
         private var glyphCount = 16
+
+        // pool glyph pet (thuần ký tự)
+        private var petBodyGlyphs: IntArray = intArrayOf(0)
+        private var petSleepGlyphs: IntArray = intArrayOf(0)
+        private var petPlayGlyphs: IntArray = intArrayOf(0)
+        private var petEyeGlyphs: IntArray = intArrayOf(0)
+        private var petMouthGlyphs: IntArray = intArrayOf(0)
+        private var petBodyIdx = 0
+        private var petSleepIdx = 0
+        private var petPlayIdx = 0
+        private var petEyeIdx = 0
+        private var petMouthIdx = 0
 
         private var petX = 40f
         private var petY = 0f
@@ -403,8 +408,7 @@ class KaleidoWallpaperService : WallpaperService() {
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
 
             glyphCount = buildAtlas().coerceAtLeast(1)
-            // chọn glyph thân pet: dùng glyph cuối atlas (khác với phần lớn glyph vệ tinh nền)
-            petGlyphIdx = (glyphCount - 1).coerceAtLeast(0)
+            buildPetAtlas()
             val symCount = glyphCount
 
             // dữ liệu hạt: angle, rad, zOffset, speed, symbol (5 float / hạt)
@@ -449,7 +453,6 @@ class KaleidoWallpaperService : WallpaperService() {
             petLocSize = GLES20.glGetUniformLocation(petProg, "uSize")
             petLocRot = GLES20.glGetUniformLocation(petProg, "uRot")
             petLocGlyph = GLES20.glGetUniformLocation(petProg, "uGlyphIdx")
-            petLocUseTex = GLES20.glGetUniformLocation(petProg, "uUseTex")
             petLocColor = GLES20.glGetUniformLocation(petProg, "uColor")
             petLocTex = GLES20.glGetUniformLocation(petProg, "uTex")
 
@@ -544,6 +547,67 @@ class KaleidoWallpaperService : WallpaperService() {
             return syms.size
         }
 
+        // Atlas riêng cho pet: 16 ô 64px, layout [body.. | sleep.. | play.. | eye.. | mouth].
+        // Mỗi phiên chọn 1 glyph mỗi pool → pet có "cá tính" riêng mỗi lần bật wallpaper.
+        private fun buildPetAtlas() {
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+                textSize = 42f
+                color = Color.WHITE
+                textAlign = Paint.Align.CENTER
+            }
+            fun pool(src: String, max: Int): List<String> {
+                val l = src.map { it.toString() }.filter { p.hasGlyph(it) }
+                val safe = if (l.isEmpty()) listOf("+") else l
+                return safe.take(max)
+            }
+            val body  = pool(PET_BODY_SYMBOLS,  6)
+            val sleep = pool(PET_SLEEP_SYMBOLS, 4)
+            val play  = pool(PET_PLAY_SYMBOLS,  3)
+            val eye   = pool(PET_EYE_SYMBOLS,   2)
+            val mouth = pool(PET_MOUTH_SYMBOLS, 1)
+
+            var cursor = 0
+            fun place(list: List<String>): IntArray {
+                val start = cursor
+                cursor += list.size
+                return IntArray(list.size) { start + it }
+            }
+            petBodyGlyphs  = place(body)
+            petSleepGlyphs = place(sleep)
+            petPlayGlyphs  = place(play)
+            petEyeGlyphs   = place(eye)
+            petMouthGlyphs = place(mouth)
+
+            petBodyIdx  = petBodyGlyphs[Random.nextInt(petBodyGlyphs.size)]
+            petSleepIdx = petSleepGlyphs[Random.nextInt(petSleepGlyphs.size)]
+            petPlayIdx  = petPlayGlyphs[Random.nextInt(petPlayGlyphs.size)]
+            petEyeIdx   = petEyeGlyphs[Random.nextInt(petEyeGlyphs.size)]
+            petMouthIdx = petMouthGlyphs[Random.nextInt(petMouthGlyphs.size)]
+
+            // Ghi cùng thứ tự lên bitmap để index khớp cursor ở trên
+            val ordered = body + sleep + play + eye + mouth
+            val bmp = Bitmap.createBitmap(1024, 64, Bitmap.Config.ARGB_8888)
+            val cv = Canvas(bmp)
+            val fm = p.fontMetrics
+            val baseY = 32f - (fm.ascent + fm.descent) / 2f
+            ordered.forEachIndexed { i, s ->
+                if (i < 16) cv.drawText(s, i * 64f + 32f, baseY, p)
+            }
+
+            val ids = IntArray(1)
+            GLES20.glGenTextures(1, ids, 0)
+            petTex = ids[0]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, petTex)
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+            GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            bmp.recycle()
+        }
+
         private fun releaseGL() {
             try {
                 if (dpy != EGL14.EGL_NO_DISPLAY) {
@@ -553,9 +617,11 @@ class KaleidoWallpaperService : WallpaperService() {
                         GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
                         GLES20.glDeleteProgram(prog)
                         if (petVbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(petVbo), 0)
+                        if (petTex != 0) GLES20.glDeleteTextures(1, intArrayOf(petTex), 0)
                         if (petProg != 0) GLES20.glDeleteProgram(petProg)
                     }
                     petVbo = 0
+                    petTex = 0
                     petProg = 0
                     EGL14.eglMakeCurrent(dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
                     if (surf != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(dpy, surf)
@@ -651,13 +717,13 @@ class KaleidoWallpaperService : WallpaperService() {
                     GLES20.glDisableVertexAttribArray(locP)
                     GLES20.glDisableVertexAttribArray(locSym)
 
-                    // ── Vẽ pet (glyph quad + vệ tinh + mắt) ──
-                    if (petProg != 0 && petVbo != 0) {
+                    // ── Vẽ pet (thuần glyph: body + mắt + miệng + vệ tinh) ──
+                    if (petProg != 0 && petVbo != 0 && petTex != 0) {
                         GLES20.glUseProgram(petProg)
                         GLES20.glUniformMatrix4fv(petLocMV, 1, false, mv, 0)
                         GLES20.glUniformMatrix4fv(petLocProj, 1, false, proj, 0)
                         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, petTex)
                         GLES20.glUniform1i(petLocTex, 0)
                         GLES20.glEnable(GLES20.GL_BLEND)
                         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
@@ -674,10 +740,8 @@ class KaleidoWallpaperService : WallpaperService() {
                             val c = Color.HSVToColor(floatArrayOf(((h % 360f) + 360f) % 360f, s, v))
                             setColor3(Color.red(c) / 255f, Color.green(c) / 255f, Color.blue(c) / 255f)
                         }
-                        fun drawQuad(glyphIdx: Float, useTex: Float,
-                                     px: Float, py: Float, size: Float, rot: Float) {
-                            GLES20.glUniform1f(petLocGlyph, glyphIdx)
-                            GLES20.glUniform1f(petLocUseTex, useTex)
+                        fun drawGlyph(glyphIdx: Int, px: Float, py: Float, size: Float, rot: Float) {
+                            GLES20.glUniform1f(petLocGlyph, glyphIdx.toFloat())
                             GLES20.glUniform1f(petLocSize, size)
                             GLES20.glUniform1f(petLocRot, rot)
                             GLES20.glUniform2f(petLocPos, px, py)
@@ -688,46 +752,60 @@ class KaleidoWallpaperService : WallpaperService() {
                         val cx = petX + kotlin.math.sin(petWobble) * 1.2f
                         val cy = petY + kotlin.math.cos(petWobble * 0.8f) * 0.9f
 
+                        // chọn glyph body theo state — đây là "linh hồn" pet
+                        val bodyGlyph = when {
+                            petSleeping   -> petSleepIdx
+                            petMood > 75f -> petPlayIdx
+                            else          -> petBodyIdx
+                        }
+
                         // màu thân theo mood (ngủ = xanh lơ lạnh)
                         val moodT = (petMood / 100f).coerceIn(0f, 1f)
                         val bodyHue = if (petSleeping) 210f else (140f + moodT * 60f)
 
-                        // thân: glyph to, quay chậm, thở nhẹ
+                        // body: 1 glyph to, quay chậm, thở nhẹ
                         val breathe = 1f + kotlin.math.sin(animTime * 2f) * 0.08f
                         val bodySize = 22f * breathe
-                        val bodyRot = animTime * (if (petSleeping) 0.25f else 0.7f)
+                        val bodyRot = if (petSleeping) 0f else animTime * 0.35f
                         setColorHSV(bodyHue, 0.80f, 1f)
-                        drawQuad(petGlyphIdx.toFloat(), 1f, cx, cy, bodySize, bodyRot)
+                        drawGlyph(bodyGlyph, cx, cy, bodySize, bodyRot)
 
-                        // vệ tinh: 3 glyph nhỏ bay quanh (ellipse cho cảm giác 3D)
-                        val orbitCount = 3
+                        // vệ tinh: 2 glyph nhỏ bay quanh (ellipse cho cảm giác 3D)
+                        val orbitCount = 2
                         val orbitR = bodySize * 0.95f
                         val orbitSpeed = if (petSleeping) 0.35f else 1.2f
                         for (i in 0 until orbitCount) {
                             val ang = animTime * orbitSpeed + i * (2f * PI.toFloat() / orbitCount)
                             val ox = cx + kotlin.math.cos(ang) * orbitR
                             val oy = cy + kotlin.math.sin(ang) * orbitR * 0.5f
-                            val sIdx = ((petGlyphIdx + i + 1) % glyphCount).toFloat()
-                            val sSize = 7f + kotlin.math.sin(animTime * 3f + i) * 1.5f
+                            val sIdx = petBodyGlyphs[(i + 1) % petBodyGlyphs.size]
+                            val sSize = 6f + kotlin.math.sin(animTime * 3f + i) * 1.2f
                             setColorHSV(bodyHue + 70f + i * 35f, 0.75f, 1f)
-                            drawQuad(sIdx, 1f, ox, oy, sSize, animTime * 1.5f + i * 1.3f)
+                            drawGlyph(sIdx, ox, oy, sSize, animTime * 1.5f + i * 1.3f)
                         }
 
-                        // mắt (chỉ khi thức)
+                        // mặt: mắt (glyph) + miệng (glyph), đặt so le trên body
                         if (!petSleeping) {
                             val lookPhase = petWobble * 1.7f
-                            val lookX = kotlin.math.sin(lookPhase) * bodySize * 0.04f
-                            val lookY = kotlin.math.cos(lookPhase * 1.3f) * bodySize * 0.03f
+                            val lookX = kotlin.math.sin(lookPhase) * bodySize * 0.02f
+                            val lookY = kotlin.math.cos(lookPhase * 1.3f) * bodySize * 0.015f
+                            setColor3(1f, 1f, 1f)
                             for (side in intArrayOf(-1, 1)) {
-                                val eyeX = cx + side * bodySize * 0.22f
-                                val eyeY = cy + bodySize * 0.06f
-                                // lòng trắng
-                                setColor3(1f, 1f, 1f)
-                                drawQuad(0f, 0f, eyeX, eyeY, bodySize * 0.34f, 0f)
-                                // con ngươi
-                                setColor3(0.05f, 0.05f, 0.08f)
-                                drawQuad(0f, 0f, eyeX + lookX, eyeY + lookY,
-                                         bodySize * 0.17f, 0f)
+                                val eyeX = cx + side * bodySize * 0.20f + lookX
+                                val eyeY = cy - bodySize * 0.03f + lookY
+                                drawGlyph(petEyeIdx, eyeX, eyeY, bodySize * 0.24f, 0f)
+                            }
+                            // miệng nhỏ dưới mắt
+                            setColorHSV(bodyHue + 30f, 0.6f, 1f)
+                            drawGlyph(petMouthIdx, cx, cy + bodySize * 0.22f, bodySize * 0.20f, 0f)
+                        } else {
+                            // ngủ: 2 mắt nhắm thành 2 gạch ngang (dùng glyph ngủ luôn cho tiện pool)
+                            setColor3(0.85f, 0.9f, 1f)
+                            for (side in intArrayOf(-1, 1)) {
+                                drawGlyph(petEyeIdx,
+                                          cx + side * bodySize * 0.20f,
+                                          cy - bodySize * 0.03f,
+                                          bodySize * 0.18f, 0f)
                             }
                         }
 
