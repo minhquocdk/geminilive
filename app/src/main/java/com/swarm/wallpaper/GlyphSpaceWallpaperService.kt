@@ -59,7 +59,7 @@ private const val K_TILT_X_PER_DEG = 1.35f
 private const val K_TILT_Y_PER_DEG = 1.00f
 private const val K_TILT_LIMIT_DEG = 35f
 private const val K_SENSOR_STILL_EPS_DEG = 0.20f
-private const val K_MODE_COUNT = 8
+private const val K_MODE_COUNT = 9
 
 // Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
 // shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
@@ -192,6 +192,99 @@ vec3 posClock(float t, float id, float seed, float phase, float speed, float min
     return vec3(cos(a) * ring * aspectX, sin(a) * ring * 0.9, 200.0 + sin(a * 1.4 + seed) * 260.0);
 }
 
+// Mặt Pokemon (Bulbasaur-style): phân bổ glyph theo role để vẽ viền đầu + tai,
+// 2 mắt (tròng trắng + iris hồng + đồng tử), má hồng, mũi, miệng cười rộng, chấm trán.
+vec3 posPokemon(float t, float id, float seed, float minDim) {
+    float R = minDim * 0.40;
+    float role = fract(id * 0.6180339887) * 140.0;
+    float u;
+    vec2 p = vec2(0.0);
+    float z = 90.0;
+    float breathe = 1.0 + sin(t * 1.1 + seed * 0.3) * 0.012;
+
+    if (role < 46.0) {
+        // Viền đầu: superellipse + bướu tai trên-trái / trên-phải.
+        u = role / 46.0;
+        float a = u * 6.28318530718;
+        float c = cos(a);
+        float s = sin(a);
+        float n = 2.6;
+        float rr = pow(pow(abs(c), n) + pow(abs(s), n), -1.0 / n);
+        float earL = exp(-pow((a - 4.19) / 0.28, 2.0)) * 0.40;
+        float earR = exp(-pow((a - 5.23) / 0.28, 2.0)) * 0.40;
+        rr += max(0.0, earL) + max(0.0, earR);
+        p = vec2(c * 0.86, s * 0.72) * rr * R * breathe;
+        z = 70.0;
+    } else if (role < 62.0) {
+        // Mắt trái — vành trắng
+        u = (role - 46.0) / 16.0;
+        float a = u * 6.28318530718 + 1.5707963;
+        vec2 c = vec2(-0.36, -0.04) * R;
+        p = c + vec2(cos(a) * 0.22 * R, sin(a) * 0.28 * R) * breathe;
+        z = 40.0;
+    } else if (role < 78.0) {
+        // Mắt phải — vành trắng
+        u = (role - 62.0) / 16.0;
+        float a = u * 6.28318530718 + 1.5707963;
+        vec2 c = vec2(0.36, -0.04) * R;
+        p = c + vec2(cos(a) * 0.22 * R, sin(a) * 0.28 * R) * breathe;
+        z = 40.0;
+    } else if (role < 90.0) {
+        // Iris trái (hồng/đỏ)
+        u = (role - 78.0) / 12.0;
+        float a = u * 6.28318530718;
+        vec2 c = vec2(-0.36, -0.02) * R;
+        p = c + vec2(cos(a) * 0.13 * R, sin(a) * 0.17 * R) * breathe;
+        z = 30.0;
+    } else if (role < 102.0) {
+        // Iris phải
+        u = (role - 90.0) / 12.0;
+        float a = u * 6.28318530718;
+        vec2 c = vec2(0.36, -0.02) * R;
+        p = c + vec2(cos(a) * 0.13 * R, sin(a) * 0.17 * R) * breathe;
+        z = 30.0;
+    } else if (role < 108.0) {
+        // Hai mảng xanh đậm trên trán
+        u = (role - 102.0) / 6.0;
+        if (u < 0.5) {
+            float v = u * 2.0;
+            p = mix(vec2(-0.22, -0.36), vec2(-0.07, -0.24), v) * R;
+        } else {
+            float v = (u - 0.5) * 2.0;
+            p = mix(vec2(0.07, -0.24), vec2(0.22, -0.36), v) * R;
+        }
+        z = 55.0;
+    } else if (role < 130.0) {
+        // Miệng — cung cười rộng (parabola ngược, đáy lõm xuống)
+        u = (role - 108.0) / 22.0;
+        float x = mix(-0.46, 0.46, u);
+        float y = 0.16 + (1.0 - pow(x / 0.46, 2.0)) * 0.22;
+        p = vec2(x, y) * R * breathe;
+        z = 45.0;
+    } else if (role < 134.0) {
+        // Ruột miệng (đỏ) — cung nhỏ hơn bên trong
+        u = (role - 130.0) / 4.0;
+        float x = mix(-0.36, 0.36, u);
+        float y = 0.20 + (1.0 - pow(x / 0.36, 2.0)) * 0.13;
+        p = vec2(x, y) * R * breathe;
+        z = 42.0;
+    } else if (role < 137.0) {
+        // Hai lỗ mũi nhỏ
+        u = (role - 134.0) / 3.0;
+        float x = mix(-0.07, 0.07, u);
+        p = vec2(x, 0.08) * R * breathe;
+        z = 50.0;
+    } else {
+        // Chấm trán
+        u = (role - 137.0) / 3.0;
+        float x = mix(-0.02, 0.02, u);
+        p = vec2(x, -0.44) * R * breathe;
+        z = 60.0;
+    }
+
+    return vec3(p.x, p.y, z);
+}
+
 vec3 positionForMode(float mode, float t, float id, float seed, float phase, float speed) {
     float minDim = min(uSize.x, uSize.y);
     float aspectX = max(1.0, uSize.x / max(1.0, uSize.y));
@@ -211,7 +304,8 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
                    posMatrix(t, id, seed, speed, 13.0, 1.0), bl);
     }
     if (mode < 6.5) return posClock(t, id, seed, phase, speed, minDim, aspectX);
-    return posMatrix(t, id, seed, speed, 22.0, 1.6); // MATRIX REAL
+    if (mode < 7.5) return posMatrix(t, id, seed, speed, 22.0, 1.6); // MATRIX REAL
+    return posPokemon(t, id, seed, minDim);                            // POKEMON FACE
 }
 
 void main() {
@@ -284,11 +378,11 @@ void main() {
     vSym = mix(baseSym, glitchSym, glitching * swapGate);
 
     float modeSel = mix(uMode, uNextMode, uTransitioning * step(0.5, uTransitionT));
-    vTexSel = step(6.5, modeSel);
+    vTexSel = step(6.5, modeSel) * step(modeSel, 7.5);
     float sizeMul = 1.0;
     if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 2.0;      // DRIFT / MATRIX: baseSize x2
     else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 2.0; // DRIFT+MATRIX lai
-    else if (modeSel > 6.5) sizeMul = 2.0;                  // MATRIX REAL
+    else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 2.0; // MATRIX REAL
 
     // logical pixels -> clip space. Android viewport tự scale lên physical pixels.
     float cx = sx / uSize.x * 2.0 - 1.0;
@@ -771,7 +865,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
             val logicalW = w / dpr
             val logicalH = h / dpr
-            glyphCount = min(140, max(56, ((logicalW * logicalH) / 7400f).toInt()))
+            glyphCount = min(160, max(100, ((logicalW * logicalH) / 7400f).toInt()))
 
             // 8 float / glyph = 32 bytes. Buffer tĩnh: shader tự animate hoàn toàn.
             val buf = ByteBuffer.allocateDirect(glyphCount * 8 * 4)
