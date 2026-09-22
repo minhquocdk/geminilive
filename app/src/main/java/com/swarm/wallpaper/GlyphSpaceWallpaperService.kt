@@ -39,8 +39,9 @@ import kotlin.math.sqrt
 import kotlin.random.Random
 
 // ───────────────────────── KASCP3 / AI GLYPH SPACE ─────────────────────────
-// Port từ kascp3_mvp.html, giữ 4 mode ORBIT / DRIFT / MATRIX / PULSE.
-// Tối ưu theo kiến trúc gemlive.kt: EGL + GLES2, VBO tĩnh, glyph texture atlas,
+// 7 mode: ORBIT / DRIFT / MATRIX / PULSE / HELIX / WAVE / VORTEX.
+// ORBIT và PULSE tự thích ứng tỷ lệ màn hình dọc (portrait).
+// Tối ưu theo kiến trúc: EGL + GLES2, VBO tĩnh, glyph texture atlas,
 // adaptive FPS, power saver, sensor low-pass, lifecycle dừng render khi ẩn.
 
 private const val K_FPS = 30
@@ -98,6 +99,8 @@ vec3 hsl2rgb(float h, float s, float l) {
 vec3 positionForMode(float mode, float t, float id, float seed, float phase, float speed) {
     float minDim = min(uSize.x, uSize.y);
     float aspectX = max(1.0, uSize.x / max(1.0, uSize.y));
+    // portrait = 1 khi màn hình dọc (cao hơn rộng) -> dùng để nắn ellipse theo trục dọc.
+    float portrait = step(uSize.y, uSize.x * 1.05);
 
     if (mode < 0.5) { // ORBIT
         float lane12 = mod(id, 12.0);
@@ -105,9 +108,12 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
         float radius = minDim * ring;
         float a = phase + t * speed * 0.34 + lane12 * 3.14159265359 / 6.0;
         float wobble = sin(t * 0.7 + seed) * minDim * 0.035;
+        // Portrait: bán kính ngang co, bán kính dọc giãn để vòng orbit lấp đầy khung.
+        float rxs = mix(aspectX, 0.88, portrait);
+        float rys = mix(0.58, 1.42, portrait);
         return vec3(
-            cos(a) * (radius + wobble) * aspectX,
-            sin(a) * radius * 0.58,
+            cos(a) * (radius + wobble) * rxs,
+            sin(a) * (radius + wobble) * rys,
             130.0 + sin(a * 1.7 + seed) * 310.0
         );
     }
@@ -133,16 +139,56 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
         return vec3(col + pulse, travel, 40.0 + depthCycle);
     }
 
-    // PULSE: 12-way symmetry, no geometric core
-    float branch = mod(id, 12.0);
-    float layer = floor(id / 12.0);
-    float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
-    float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
-    float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
+    if (mode < 3.5) { // PULSE: 12-way symmetry, no geometric core
+        float branch = mod(id, 12.0);
+        float layer = floor(id / 12.0);
+        float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
+        float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
+        float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
+        // Portrait: PULSE kéo dọc để 12 nhánh không bị co cụm giữa màn hình dọc.
+        float rxsP = mix(aspectX, 0.92, portrait);
+        float rysP = mix(1.0, 1.38, portrait);
+        return vec3(
+            cos(angle) * baseR * pulse * rxsP,
+            sin(angle) * baseR * pulse * rysP,
+            120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
+        );
+    }
+
+    if (mode < 4.5) { // HELIX: hai dải xoắn ốc (double helix) chạy dọc màn hình
+        float arm = step(0.5, fract(id * 0.5)) * 2.0 - 1.0;
+        float lane = floor(id * 0.5);
+        float t2 = t * (0.35 + speed * 0.35) + lane * 0.37 + seed * 0.1;
+        float y = sin(t2) * uSize.y * 0.42 + sin(seed) * uSize.y * 0.08;
+        float x = cos(t2 + arm * 1.2) * minDim * 0.42 + arm * minDim * 0.06;
+        float z = 90.0 + ((cos(t2 * 1.3) + 1.0) * 0.5) * 520.0;
+        return vec3(x, y, z);
+    }
+
+    if (mode < 5.5) { // WAVE: lưới glyph gợn sóng ngang, wave packet theo cột
+        float cols = 14.0;
+        float col = mod(id, cols) / (cols - 1.0) - 0.5;
+        float row = floor(id / cols);
+        float wave = sin(t * (0.7 + speed * 0.5) + col * 6.2831853072 + seed * 0.3)
+                   + sin(t * 0.5 + row * 0.7) * 0.6;
+        float x = col * uSize.x * 1.02;
+        float y = wave * uSize.y * 0.14 + (row - 2.5) * (uSize.y / 9.0);
+        float z = 120.0 + (sin(t * 0.9 + col * 5.0 + row) + 1.0) * 240.0;
+        return vec3(x, y, z);
+    }
+
+    // VORTEX: xoáy loga 24 tia quanh tâm, bán kính tăng dần theo vành.
+    float lane = mod(id, 24.0);
+    float ring = floor(id / 24.0);
+    float a = lane * 0.2617993878 + t * (0.4 + speed * 0.3) + ring * 0.5 + seed * 0.2;
+    float r = minDim * (0.08 + (ring + 1.0) * 0.045) + sin(t * 0.9 + lane) * minDim * 0.03;
+    // Portrait: xoáy cũng giãn nhẹ theo trục dọc cho cân khung.
+    float rxsV = mix(aspectX, 0.95, portrait);
+    float rysV = mix(0.78, 1.32, portrait);
     return vec3(
-        cos(angle) * baseR * pulse * aspectX,
-        sin(angle) * baseR * pulse,
-        120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
+        cos(a) * r * rxsV,
+        sin(a) * r * rysV,
+        90.0 + ((sin(a * 2.0 + t * 0.7) + 1.0) * 0.5) * 540.0
     );
 }
 
@@ -659,7 +705,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 if (transitioning) {
                     transitionT = ((now - transitionStartAt).toFloat() / K_TRANSITION_MS).coerceIn(0f, 1f)
                     if (transitionT >= 1f) {
-                        modeIndex = (modeIndex + 1) % 4
+                        modeIndex = (modeIndex + 1) % 7
                         transitioning = false
                         transitionT = 0f
                     }
@@ -677,7 +723,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUseProgram(prog)
                 GLES20.glUniform1f(locTime, timeSec)
                 GLES20.glUniform1f(locMode, modeIndex.toFloat())
-                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 4).toFloat())
+                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 7).toFloat())
                 GLES20.glUniform1f(locTransitionT, transitionT)
                 GLES20.glUniform1f(locTransitioning, if (transitioning) 1f else 0f)
                 GLES20.glUniform1f(locTransitionSerial, transitionSerial)
