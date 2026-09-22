@@ -49,7 +49,7 @@ private const val K_FPS_ACTIVE = 60
 private const val K_FPS_SAVER = 15
 private const val K_TRANSITION_MS = 850L
 private const val K_FOCAL = 520f
-private const val K_MAX_DPR = 1.75f
+private const val K_MAX_DPR = 1.4f
 private const val K_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
 private const val K_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
 private const val K_SYMBOLS_MATRIX = "ﾊﾐﾋｰｳｼﾅﾓﾆｻﾜﾂｵﾘｱﾎﾃﾏｹﾒｴｶｷﾑﾕﾗ012789"
@@ -163,7 +163,7 @@ vec3 posPulse(float t, float id, float seed, float minDim, float aspectX) {
 // phần glyph còn lại orbit nhẹ quanh mặt số với z lệch tạo cảm giác 3D.
 vec3 posClock(float t, float id, float seed, float phase, float speed, float minDim, float aspectX) {
     float faceR = minDim * 0.40;
-    float role = mod(id, 40.0);
+    float role = mod(id, 72.0);
 
     if (role < 12.0) {
         float a = role / 12.0 * 6.28318530718 - 1.57079632679;
@@ -185,8 +185,10 @@ vec3 posClock(float t, float id, float seed, float phase, float speed, float min
         return vec3(cos(secAngle) * rr * aspectX, sin(secAngle) * rr, 50.0);
     }
     float lane = role - 36.0;
-    float ring = faceR * (1.15 + lane * 0.12);
-    float a = phase + t * speed * 0.22 + lane * 2.09;
+    float ringIdx = mod(lane, 9.0);
+    float ringLap = floor(lane / 9.0);
+    float ring = faceR * (1.15 + ringIdx * 0.10);
+    float a = phase + t * (speed * 0.22 + ringLap * 0.03) + lane * 1.15;
     return vec3(cos(a) * ring * aspectX, sin(a) * ring * 0.9, 200.0 + sin(a * 1.4 + seed) * 260.0);
 }
 
@@ -238,18 +240,18 @@ void main() {
     float sx = uSize.x * 0.5 + (p.x - uCamera.x * depthParallax) * scale;
     float sy = uSize.y * 0.5 + (p.y - uCamera.y * depthParallax) * scale;
 
-    // Vòng đời glyph: giữ fade/glitch spawn của HTML nhưng thực hiện ở shader.
+    // Vòng đời glyph: spawn dùng lóe sáng nhẹ (flash), glitch chỉ còn khi chuyển mode.
     float age = mod(uTime + ageOffset, life);
     float glitchMs = mix(140.0, 420.0, hash11(seed + 17.0));
-    float spawning = 1.0 - step(glitchMs, age * 1000.0);
+    float spawnFlash = 1.0 - smoothstep(0.0, glitchMs, age * 1000.0);
 
     float transRand = hash11(id * 19.13 + uTransitionSerial * 71.7 + seed);
     float transGlitchDur = mix(0.08, 0.20, hash11(seed + uTransitionSerial * 3.1));
     float transitionGlitch = uTransitioning * (1.0 - step(0.28, transRand))
                            * (1.0 - step(transGlitchDur, uTransitionT * 0.85));
-    float glitching = max(spawning, transitionGlitch);
+    float glitching = transitionGlitch;
 
-    // Jitter + đổi ký tự theo frame khi glitch.
+    // Jitter + đổi ký tự theo frame chỉ khi glitch chuyển mode (spawn không jitter nữa).
     float frameKey = floor(uTime * 30.0);
     float jr = hash11(seed * 3.1 + frameKey * 1.7 + id);
     float jy = hash11(seed * 5.7 + frameKey * 2.3 + id * 0.7);
@@ -260,6 +262,7 @@ void main() {
     float lifeFadeIn = sat(age / 0.5);
     float lifeFadeOut = sat((life - age) / 0.8);
     float alpha = edgeFade * lifeFadeIn * lifeFadeOut * sat(0.25 + scale * 0.95);
+    alpha = min(1.0, alpha + spawnFlash * 0.55);
     if (glitching > 0.5) alpha *= mix(0.35, 1.0, hash11(frameKey + seed * 11.0));
 
     // Palette 4 lớp (kỹ thuật Gemini): chọn lớp theo thời gian, nội suy
@@ -272,6 +275,7 @@ void main() {
     vec3 pa = mix(uAccent[li], uAccent[ni], lt);
     float coreMix = clamp((1.0 - scale) * 1.25, 0.0, 1.0);
     vec3 rgb = mix(pc, pa, coreMix);
+    rgb = mix(rgb, vec3(1.0), spawnFlash * 0.65);
     if (glitching > 0.5) rgb = min(vec3(1.0), rgb * 1.25);
     vColor = vec4(rgb, alpha);
 
@@ -767,7 +771,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
             val logicalW = w / dpr
             val logicalH = h / dpr
-            glyphCount = min(180, max(64, ((logicalW * logicalH) / 6200f).toInt()))
+            glyphCount = min(140, max(56, ((logicalW * logicalH) / 7400f).toInt()))
 
             // 8 float / glyph = 32 bytes. Buffer tĩnh: shader tự animate hoàn toàn.
             val buf = ByteBuffer.allocateDirect(glyphCount * 8 * 4)
