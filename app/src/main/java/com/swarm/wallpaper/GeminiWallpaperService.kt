@@ -21,6 +21,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.service.wallpaper.WallpaperService
+import android.util.Log
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import java.nio.ByteBuffer
@@ -39,6 +40,8 @@ private const val G_SPARK_N = 0.7f        // độ "nhọn" của hình sparkle
 private const val G_SIZE_BOOST = 1.6f     // nhân kích thước ký tự cho dễ nhìn trên màn hình nhỏ
 private const val G_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
+private const val G_SHAPE_CENTER = 3.5f
+private const val TAG = "GeminiWallpaper"
 
 private class GWave(var radius: Float, val state: Int)
 
@@ -126,6 +129,7 @@ class GeminiWallpaperService : WallpaperService() {
 
         private var shown = false
         private var glReady = false
+        private var eglInited = false
 
         private var dpy: EGLDisplay = EGL14.EGL_NO_DISPLAY
         private var ctx: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -261,6 +265,7 @@ class GeminiWallpaperService : WallpaperService() {
             if (dpy == EGL14.EGL_NO_DISPLAY) return false
             val ver = IntArray(2)
             if (!EGL14.eglInitialize(dpy, ver, 0, ver, 1)) return false
+            eglInited = true
             val attr = intArrayOf(
                 EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
                 EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
@@ -330,7 +335,7 @@ class GeminiWallpaperService : WallpaperService() {
                 buf.put(0.8f + Random.nextFloat() * 1.2f)
                 buf.put(Random.nextInt(symCount).toFloat())
             }
-            buf.position(0)
+            buf.rewind()
             val ids = IntArray(1)
             GLES20.glGenBuffers(1, ids, 0)
             vbo = ids[0]
@@ -374,7 +379,7 @@ class GeminiWallpaperService : WallpaperService() {
 
         private fun releaseGL() {
             try {
-                if (dpy != EGL14.EGL_NO_DISPLAY) {
+                if (eglInited) {
                     if (glReady && ctx != EGL14.EGL_NO_CONTEXT && surf != EGL14.EGL_NO_SURFACE) {
                         EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
                         GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
@@ -386,11 +391,13 @@ class GeminiWallpaperService : WallpaperService() {
                     if (ctx != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(dpy, ctx)
                 }
             } catch (e: Exception) {
-                // bỏ qua
+                Log.w(TAG, "releaseGL failed", e)
             }
             surf = EGL14.EGL_NO_SURFACE
             ctx = EGL14.EGL_NO_CONTEXT
+            dpy = EGL14.EGL_NO_DISPLAY
             glReady = false
+            eglInited = false
         }
 
         // ── khung hình ──
@@ -435,8 +442,8 @@ class GeminiWallpaperService : WallpaperService() {
                     Matrix.rotateM(mv, 0, rz, 0f, 0f, 1f)
                     Matrix.scaleM(mv, 0, scale, scale, scale)
 
-                    val shape = (3.5f + G_SPARK_N) / 2f +
-                        ((3.5f - G_SPARK_N) / 2f) * kotlin.math.sin(morph)
+                    val shape = (G_SHAPE_CENTER + G_SPARK_N) / 2f +
+                        (G_SHAPE_CENTER - G_SPARK_N) / 2f * kotlin.math.sin(morph)
 
                     java.util.Arrays.fill(waveArr, 0f)
                     for (i in 0 until waves.size) {
@@ -477,7 +484,7 @@ class GeminiWallpaperService : WallpaperService() {
 
                 EGL14.eglSwapBuffers(dpy, surf)
             } catch (e: Exception) {
-                // bỏ qua khung lỗi
+                Log.w(TAG, "drawFrame failed", e)
             }
         }
     }
