@@ -29,6 +29,8 @@ import android.view.SurfaceHolder
 import android.view.ViewConfiguration
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Calendar
+=======
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -50,8 +52,9 @@ private const val K_TRANSITION_MS = 850L
 private const val K_FOCAL = 520f
 private const val K_MAX_DPR = 1.75f
 private const val K_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
-private const val K_MATRIX_SYMBOLS = "ﾊﾐﾋｰｳｼﾅ"
 private const val K_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
+private const val K_SYMBOLS_MATRIX = "01ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎ"
+private const val K_SYMBOLS_MATRIX_FALLBACK = "0123456789"
 private const val K_TILT_SMOOTH_HZ = 4.5f
 private const val K_TILT_X_PER_DEG = 1.35f
 private const val K_TILT_Y_PER_DEG = 1.00f
@@ -77,10 +80,12 @@ uniform vec2 uSize;      // logical CSS-like pixels
 uniform vec2 uCamera;    // logical pixels
 uniform float uDpr;
 uniform float uFocal;
-uniform vec4 uClock;
+uniform float uHourAngle;
+uniform float uMinuteAngle;
 
 varying vec4 vColor;
 varying float vSym;
+varying float vAtlas;
 
 float hash11(float p) {
     return fract(sin(p * 127.1 + 311.7) * 43758.5453123);
@@ -95,55 +100,6 @@ vec3 hsl2rgb(float h, float s, float l) {
     rgb = rgb * rgb * (3.0 - 2.0 * rgb);
     float c = (1.0 - abs(2.0 * l - 1.0)) * s;
     return (rgb - 0.5) * c + l;
-}
-
-vec3 positionForMode(float mode, float t, float id, float seed, float phase, float speed);
-
-float segBits(float d) {
-    if (d < 0.5) return 63.0;
-    if (d < 1.5) return 6.0;
-    if (d < 2.5) return 91.0;
-    if (d < 3.5) return 79.0;
-    if (d < 4.5) return 102.0;
-    if (d < 5.5) return 109.0;
-    if (d < 6.5) return 125.0;
-    if (d < 7.5) return 7.0;
-    if (d < 8.5) return 127.0;
-    return 111.0;
-}
-
-vec3 clockPosition(float t, float id, float seed, float phase, float speed) {
-    float minDim = min(uSize.x, uSize.y);
-    float segIdx = mod(id, 28.0);
-    float digit = floor(segIdx / 7.0);
-    float seg = mod(segIdx, 7.0);
-    float digitVal = uClock.x;
-    if (digit > 0.5) digitVal = uClock.y;
-    if (digit > 1.5) digitVal = uClock.z;
-    if (digit > 2.5) digitVal = uClock.w;
-    float bits = segBits(digitVal);
-    float bitMask = exp2(seg);
-    float on = mod(floor(bits / bitMask + 0.0001), 2.0);
-    float digitW = minDim * 0.13;
-    float digitH = minDim * 0.26;
-    float spacing = digitW * 1.35;
-    float baseX = -spacing * 1.5 + spacing * digit;
-    float frac = clamp(hash11(id * 0.37 + seed * 0.11), 0.05, 0.95);
-    vec2 segA;
-    vec2 segB;
-    if (seg < 0.5) { segA = vec2(-1.0, -1.0); segB = vec2(1.0, -1.0); }
-    else if (seg < 1.5) { segA = vec2(1.0, -1.0); segB = vec2(1.0, 0.0); }
-    else if (seg < 2.5) { segA = vec2(1.0, 0.0); segB = vec2(1.0, 1.0); }
-    else if (seg < 3.5) { segA = vec2(-1.0, 1.0); segB = vec2(1.0, 1.0); }
-    else if (seg < 4.5) { segA = vec2(-1.0, 0.0); segB = vec2(-1.0, 1.0); }
-    else if (seg < 5.5) { segA = vec2(-1.0, -1.0); segB = vec2(-1.0, 0.0); }
-    else { segA = vec2(-1.0, 0.0); segB = vec2(1.0, 0.0); }
-    vec2 local = mix(segA, segB, frac) * vec2(digitW * 0.5, digitH * 0.5);
-    vec2 pos = vec2(baseX, 0.0) + local;
-    pos.y += (1.0 - on) * 4000.0;
-    pos.x += sin(t * 0.7 + seed) * 1.5;
-    pos.y += cos(t * 0.6 + seed * 1.3) * 1.5 * on;
-    return vec3(pos.x, pos.y, 110.0 + sin(t * 1.1 + seed) * 60.0);
 }
 
 vec3 positionForMode(float mode, float t, float id, float seed, float phase, float speed) {
@@ -188,41 +144,92 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
         float branch = mod(id, 12.0);
         float layer = floor(id / 12.0);
         float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
-        float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
+        float pul = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
         float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
         return vec3(
-            cos(angle) * baseR * pulse * aspectX,
-            sin(angle) * baseR * pulse,
+            cos(angle) * baseR * pul * aspectX,
+            sin(angle) * baseR * pul,
             120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
         );
     }
-    if (mode < 4.5) { // ORBIT + DRIFT
-        vec3 a = positionForMode(0.0, t, id, seed, phase, speed);
-        vec3 b = positionForMode(1.0, t, id, seed, phase, speed);
-        return mix(a, b, hash11(id * 0.13 + seed * 0.07));
+
+    if (mode < 4.5) { // ORBIT + PULSE
+        if (mod(id, 2.0) < 0.5) {
+            float lane12 = mod(id, 12.0);
+            float ring = 0.13 + (lane12 / 11.0) * 0.42;
+            float radius = minDim * ring;
+            float a = phase + t * speed * 0.34 + lane12 * 3.14159265359 / 6.0;
+            float wobble = sin(t * 0.7 + seed) * minDim * 0.035;
+            return vec3(
+                cos(a) * (radius + wobble) * aspectX,
+                sin(a) * radius * 0.58,
+                130.0 + sin(a * 1.7 + seed) * 310.0
+            );
+        }
+        float branch = mod(id, 12.0);
+        float layer = floor(id / 12.0);
+        float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
+        float pul = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
+        float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
+        return vec3(
+            cos(angle) * baseR * pul * aspectX,
+            sin(angle) * baseR * pul,
+            120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
+        );
     }
-    if (mode < 5.5) { // ORBIT + MATRIX
-        vec3 a = positionForMode(0.0, t, id, seed, phase, speed);
-        vec3 b = positionForMode(2.0, t, id, seed, phase, speed);
-        return mix(a, b, hash11(id * 0.19 + seed * 0.05));
+
+    if (mode < 5.5) { // DRIFT + MATRIX
+        if (mod(id, 2.0) < 0.5) {
+            float spanX = uSize.x * 0.72;
+            float spanY = uSize.y * 0.62;
+            float x = sin(t * 0.13 * speed + seed * 0.7) * spanX
+                    + cos(t * 0.05 + seed) * spanX * 0.25;
+            float y = cos(t * 0.11 * speed + seed * 1.2) * spanY
+                    + sin(t * 0.07 + seed * 0.3) * spanY * 0.22;
+            float z = 80.0 + ((sin(t * 0.19 + seed * 2.2) + 1.0) * 0.5) * 520.0;
+            return vec3(x, y, z);
+        }
+        float lane = mod(id, 13.0) - 6.0;
+        float col = lane * (uSize.x / 14.0);
+        float travel = mod(t * (90.0 + speed * 130.0) + seed * 800.0, uSize.y * 1.7)
+                     - uSize.y * 0.85;
+        float pulse2 = sin(t * 0.8 + seed) * 18.0;
+        float depthCycle = mod(t * (70.0 + speed * 55.0) + seed * 500.0, 720.0);
+        return vec3(col + pulse2, travel, 40.0 + depthCycle);
     }
-    if (mode < 6.5) { // PULSE + DRIFT
-        vec3 a = positionForMode(3.0, t, id, seed, phase, speed);
-        vec3 b = positionForMode(1.0, t, id, seed, phase, speed);
-        return mix(a, b, hash11(id * 0.11 + seed * 0.03));
+
+    if (mode < 6.5) { // CLOCK: viền 12 giờ tĩnh + kim giờ/phút theo giờ hệ thống
+        float ring14 = mod(id, 14.0);
+        float layer = floor(id / 14.0);
+        if (ring14 < 12.0) {
+            float a = ring14 * (3.14159265359 / 6.0);
+            float r = minDim * (0.40 + mod(layer, 3.0) * 0.02);
+            return vec3(sin(a) * r * aspectX, -cos(a) * r, 160.0);
+        }
+        if (ring14 < 13.0) {
+            float seg = mod(layer, 6.0);
+            float r = minDim * (0.05 + seg * 0.028);
+            return vec3(sin(uHourAngle) * r * aspectX, -cos(uHourAngle) * r, 140.0);
+        }
+        float seg = mod(layer, 9.0);
+        float r = minDim * (0.05 + seg * 0.032);
+        return vec3(sin(uMinuteAngle) * r * aspectX, -cos(uMinuteAngle) * r, 150.0);
     }
-    if (mode < 7.5) { // PULSE + MATRIX
-        vec3 a = positionForMode(3.0, t, id, seed, phase, speed);
-        vec3 b = positionForMode(2.0, t, id, seed, phase, speed);
-        return mix(a, b, hash11(id * 0.23 + seed * 0.09));
-    }
-    if (mode < 8.5) { // DRIFT + MATRIX
-        vec3 a = positionForMode(1.0, t, id, seed, phase, speed);
-        vec3 b = positionForMode(2.0, t, id, seed, phase, speed);
-        return mix(a, b, hash11(id * 0.17 + seed * 0.13));
-    }
-    // CLOCK: glyphs form current time digits
-    return clockPosition(t, id, seed, phase, speed);
+
+    // MATRIX REAL: cùng chuyển động cột rơi, dùng atlas ký tự Matrix riêng (xem vAtlas)
+    float laneR = mod(id, 13.0) - 6.0;
+    float colR = laneR * (uSize.x / 14.0);
+    float travelR = mod(t * (90.0 + speed * 130.0) + seed * 800.0, uSize.y * 1.7)
+                 - uSize.y * 0.85;
+    float pulseR = sin(t * 0.8 + seed) * 18.0;
+    float depthCycleR = mod(t * (70.0 + speed * 55.0) + seed * 500.0, 720.0);
+    return vec3(colR + pulseR, travelR, 40.0 + depthCycleR);
+}
+
+float sizeMulForMode(float m) {
+    if (m > 0.5 && m < 2.5) return 3.0;  // DRIFT hoặc MATRIX
+    if (m > 4.5 && m < 5.5) return 3.0;  // DRIFT + MATRIX
+    return 1.0;
 }
 
 void main() {
@@ -247,6 +254,9 @@ void main() {
     float z = clamp(p.z, 0.0, 900.0);
     float scale = uFocal / (uFocal + z);
     float depthParallax = 0.35 + (1.0 - scale) * 1.4;
+    float sMul = uTransitioning > 0.5
+        ? mix(sizeMulForMode(uMode), sizeMulForMode(uNextMode), ease3(uTransitionT))
+        : sizeMulForMode(uMode);
 
     float sx = uSize.x * 0.5 + (p.x - uCamera.x * depthParallax) * scale;
     float sy = uSize.y * 0.5 + (p.y - uCamera.y * depthParallax) * scale;
@@ -276,26 +286,19 @@ void main() {
     if (glitching > 0.5) alpha *= mix(0.35, 1.0, hash11(frameKey + seed * 11.0));
 
     float hueDeg = mod(uTime * 16.0 + (1.0 - scale) * 42.0 + mod(id, 9.0) * 2.4, 360.0);
-    vec3 rgb = hsl2rgb(hueDeg / 360.0, 0.98, glitching > 0.5 ? 0.92 : 0.84);
+    vec3 rgb = hsl2rgb(hueDeg / 360.0, 0.96, glitching > 0.5 ? 0.88 : 0.80);
     vColor = vec4(rgb, alpha);
 
-    float modeSym = baseSym;
-    if (uMode > 1.5 && uMode < 2.5) modeSym = 9.0 + floor(mod(id, 7.0));
-    if (uMode > 3.5 && uMode < 8.5) {
-        modeSym = (mod(id, 2.0) < 1.0) ? baseSym : (9.0 + floor(mod(id, 7.0)));
-    }
     float glitchSym = floor(hash11(frameKey * 13.0 + seed * 31.0 + id) * 9.0);
     float swapGate = step(hash11(frameKey + seed * 7.0), 0.72);
-    vSym = mix(modeSym, glitchSym, glitching * swapGate);
+    vSym = mix(baseSym, glitchSym, glitching * swapGate);
+    vAtlas = uTransitioning > 0.5 ? step(6.5, uNextMode) : step(6.5, uMode);
 
     // logical pixels -> clip space. Android viewport tự scale lên physical pixels.
     float cx = sx / uSize.x * 2.0 - 1.0;
     float cy = 1.0 - sy / uSize.y * 2.0;
     gl_Position = vec4(cx, cy, 0.0, 1.0);
-    float modeSize = 1.0;
-    if (uMode > 1.5 && uMode < 2.5) modeSize = 1.35;
-    if (uMode > 3.5) modeSize = 1.35;
-    gl_PointSize = max(8.0, baseSize * modeSize * scale) * uDpr;
+    gl_PointSize = max(8.0, baseSize * sMul * scale) * uDpr;
 }
 """
 
@@ -303,11 +306,13 @@ private const val K_FRAG = """
 precision mediump float;
 varying vec4 vColor;
 varying float vSym;
+varying float vAtlas;
 uniform sampler2D uTex;
 
 void main() {
     vec2 uv = gl_PointCoord;
     uv.x = (uv.x + vSym) / 16.0;
+    uv.y = (uv.y + vAtlas) / 2.0;
     vec4 t = texture2D(uTex, uv);
     float a = t.a * vColor.a;
     if (a < 0.01) discard;
@@ -352,7 +357,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locDpr = -1
         private var locFocal = -1
         private var locTex = -1
-        private var locClock = -1
+        private var locHourAngle = -1
+        private var locMinuteAngle = -1
 
         private var w = 0
         private var h = 0
@@ -589,7 +595,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
             val attrs = intArrayOf(
                 EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT,
                 EGL14.EGL_RED_SIZE, 8,
                 EGL14.EGL_GREEN_SIZE, 8,
                 EGL14.EGL_BLUE_SIZE, 8,
@@ -653,7 +658,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locDpr = GLES20.glGetUniformLocation(prog, "uDpr")
             locFocal = GLES20.glGetUniformLocation(prog, "uFocal")
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
-            locClock = GLES20.glGetUniformLocation(prog, "uClock")
+            locHourAngle = GLES20.glGetUniformLocation(prog, "uHourAngle")
+            locMinuteAngle = GLES20.glGetUniformLocation(prog, "uMinuteAngle")
 
             buildAtlas()
             val ids = IntArray(1)
@@ -671,20 +677,26 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 color = Color.WHITE
                 textAlign = Paint.Align.CENTER
             }
-            val orbitSyms = K_SYMBOLS.map { it.toString() }.filter { p.hasGlyph(it) }
-            val matrixSyms = K_MATRIX_SYMBOLS.map { it.toString() }.filter { p.hasGlyph(it) }
-            var syms = orbitSyms + matrixSyms
+            var syms = K_SYMBOLS.map { it.toString() }.filter { p.hasGlyph(it) }
             if (syms.isEmpty()) syms = K_SYMBOLS_FALLBACK.map { it.toString() }.filter { p.hasGlyph(it) }
             if (syms.isEmpty()) syms = listOf("+")
             syms = syms.take(16)
 
-            val bmp = Bitmap.createBitmap(1024, 64, Bitmap.Config.ARGB_8888)
+            var symsMatrix = K_SYMBOLS_MATRIX.map { it.toString() }.filter { p.hasGlyph(it) }
+            if (symsMatrix.isEmpty()) symsMatrix = K_SYMBOLS_MATRIX_FALLBACK.map { it.toString() }.filter { p.hasGlyph(it) }
+            if (symsMatrix.isEmpty()) symsMatrix = listOf("1")
+            symsMatrix = symsMatrix.take(16)
+
+            // Atlas 2 hàng: hàng trên = symbol thường (vAtlas=0), hàng dưới = symbol Matrix (vAtlas=1).
+            val bmp = Bitmap.createBitmap(1024, 128, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
             val fm = p.fontMetrics
             val baseline = 32f - (fm.ascent + fm.descent) / 2f
+            val baseline2 = 96f - (fm.ascent + fm.descent) / 2f
             // Lấp đủ 16 cell bằng cách lặp symbol khả dụng để fallback font không tạo ô rỗng.
             for (i in 0 until 16) {
                 canvas.drawText(syms[i % syms.size], i * 64f + 32f, baseline, p)
+                canvas.drawText(symsMatrix[i % symsMatrix.size], i * 64f + 32f, baseline2, p)
             }
 
             val ids = IntArray(1)
@@ -751,11 +763,19 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 if (transitioning) {
                     transitionT = ((now - transitionStartAt).toFloat() / K_TRANSITION_MS).coerceIn(0f, 1f)
                     if (transitionT >= 1f) {
-                        modeIndex = (modeIndex + 1) % 10
+                        modeIndex = (modeIndex + 1) % 8
                         transitioning = false
                         transitionT = 0f
                     }
                 }
+
+                val cal = Calendar.getInstance()
+                val hour24 = cal.get(Calendar.HOUR_OF_DAY)
+                val minute = cal.get(Calendar.MINUTE)
+                val second = cal.get(Calendar.SECOND)
+                val hourFrac = (hour24 % 12) + minute / 60f
+                val hourAngle = hourFrac / 12f * (2f * PI.toFloat())
+                val minuteAngle = (minute + second / 60f) / 60f * (2f * PI.toFloat())
 
                 val camA = 1f - exp(-2f * PI.toFloat() * K_TILT_SMOOTH_HZ * dt)
                 cameraX += (targetCameraX - cameraX) * camA
@@ -769,19 +789,13 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUseProgram(prog)
                 GLES20.glUniform1f(locTime, timeSec)
                 GLES20.glUniform1f(locMode, modeIndex.toFloat())
-                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 10).toFloat())
+                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 8).toFloat())
+                GLES20.glUniform1f(locHourAngle, hourAngle)
+                GLES20.glUniform1f(locMinuteAngle, minuteAngle)
                 GLES20.glUniform1f(locTransitionT, transitionT)
                 GLES20.glUniform1f(locTransitioning, if (transitioning) 1f else 0f)
                 GLES20.glUniform1f(locTransitionSerial, transitionSerial)
                 GLES20.glUniform1f(locTransitionStartTime, transitionStartTimeSec)
-                val cal = java.util.Calendar.getInstance()
-                val hh = cal.get(java.util.Calendar.HOUR_OF_DAY)
-                val mm = cal.get(java.util.Calendar.MINUTE)
-                GLES20.glUniform4f(
-                    locClock,
-                    (hh / 10).toFloat(), (hh % 10).toFloat(),
-                    (mm / 10).toFloat(), (mm % 10).toFloat()
-                )
                 GLES20.glUniform2f(locSize, w / dpr, h / dpr)
                 GLES20.glUniform2f(locCamera, cameraX, cameraY)
                 GLES20.glUniform1f(locDpr, dpr)
