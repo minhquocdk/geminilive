@@ -43,6 +43,7 @@ import kotlin.random.Random
 // Tối ưu theo kiến trúc: EGL + GLES2, VBO tĩnh, glyph texture atlas,
 // adaptive FPS, power saver, sensor low-pass, lifecycle dừng render khi ẩn.
 
+// ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
 private const val K_FPS = 30
 private const val K_FPS_ACTIVE = 60
 private const val K_FPS_SAVER = 15
@@ -57,8 +58,15 @@ private const val K_TILT_Y_PER_DEG = 1.00f
 private const val K_TILT_LIMIT_DEG = 35f
 private const val K_SENSOR_STILL_EPS_DEG = 0.20f
 
+// Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
+// shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
+private val K_PALETTE_CORE = listOf("#00B95C", "#FFCC00", "#FF4641", "#3186FF")
+private val K_PALETTE_ACCENT = listOf("#00A5B7", "#FF6B2B", "#D8627E", "#A975AA")
+
+// ───────────────────────── SHADER ─────────────────────────
 // aA = id, seed, phase, speed
 // aB = size, life, ageOffset, symbolIndex
+// Toàn bộ công thức hình học + màu + vòng đời chạy trên GPU.
 private const val K_VERT = """
 precision highp float;
 
@@ -76,6 +84,8 @@ uniform vec2 uSize;      // logical CSS-like pixels
 uniform vec2 uCamera;    // logical pixels
 uniform float uDpr;
 uniform float uFocal;
+uniform vec3 uCore[4];    // màu lõi 4 lớp (kỹ thuật Gemini)
+uniform vec3 uAccent[4];  // màu viền 4 lớp
 
 varying vec4 vColor;
 varying float vSym;
@@ -99,15 +109,15 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
     float minDim = min(uSize.x, uSize.y);
     float aspectX = max(1.0, uSize.x / max(1.0, uSize.y));
 
-    if (mode < 0.5) { // ORBIT (mở rộng biên độ để phủ cả trên/dưới)
+    if (mode < 0.5) { // ORBIT
         float lane12 = mod(id, 12.0);
-        float ring = 0.15 + (lane12 / 11.0) * 0.60;
+        float ring = 0.13 + (lane12 / 11.0) * 0.42;
         float radius = minDim * ring;
         float a = phase + t * speed * 0.34 + lane12 * 3.14159265359 / 6.0;
-        float wobble = sin(t * 0.7 + seed) * minDim * 0.045;
+        float wobble = sin(t * 0.7 + seed) * minDim * 0.035;
         return vec3(
             cos(a) * (radius + wobble) * aspectX,
-            sin(a) * (radius + wobble) * 1.05,
+            sin(a) * radius * 0.58,
             130.0 + sin(a * 1.7 + seed) * 310.0
         );
     }
@@ -133,58 +143,16 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
         return vec3(col + pulse, travel, 40.0 + depthCycle);
     }
 
-    if (mode < 3.5) { // PULSE: 12-way symmetry, no geometric core (phủ cả trên/dưới)
-        float branch = mod(id, 12.0);
-        float layer = floor(id / 12.0);
-        float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.040);
-        float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.20;
-        float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
-        float rr = baseR * pulse;
-        return vec3(
-            cos(angle) * rr * aspectX,
-            sin(angle) * rr * 1.15,
-            120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
-        );
-    }
-
-    if (mode < 4.5) { // SPIRAL GALAXY: 3 nhánh cuộn vào tâm
-        float arm = mod(id, 3.0);
-        float k = floor(id / 3.0);
-        float frac = (k + 1.0) / 60.0;
-        float r = minDim * (0.06 + frac * 0.72);
-        float spin = phase + t * 0.55 + arm * 2.0943951 + frac * 4.2;
-        float breathe = 1.0 + sin(t * 0.9 + k * 0.3 + seed) * 0.08;
-        return vec3(
-            cos(spin) * r * breathe * aspectX,
-            sin(spin) * r * breathe * 1.05,
-            60.0 + (1.0 - frac) * 620.0 + sin(t + k * 0.21) * 70.0
-        );
-    }
-
-    if (mode < 5.5) { // WARP TUNNEL: vòng glyph phóng về phía camera
-        float ring = mod(id, 10.0);
-        float k = floor(id / 10.0);
-        float ang = phase + k * 0.61;
-        float z = mod(t * 240.0 + seed * 500.0, 900.0);
-        float rr = minDim * (0.09 + ring * 0.052) * (0.35 + z / 900.0);
-        return vec3(
-            cos(ang) * rr * aspectX,
-            sin(ang) * rr,
-            880.0 - z
-        );
-    }
-
-    // WAVE FIELD: lưới glyph lượn sóng, quét ngang màn hình
-    float cols = 12.0;
-    float rows = max(8.0, floor(uSize.y / max(1.0, minDim * 0.17)));
-    float gx = mod(id, cols) / (cols - 1.0) * 2.0 - 1.0;
-    float gy = mod(floor(id / cols), rows) / (rows - 1.0) * 2.0 - 1.0;
-    float wave = sin(t * 1.25 + gx * 6.2 + gy * 3.4 + seed * 0.5);
-    float wave2 = cos(t * 0.85 + gy * 4.1 + gx * 2.3 + seed * 0.3);
+    // PULSE: 12-way symmetry, no geometric core
+    float branch = mod(id, 12.0);
+    float layer = floor(id / 12.0);
+    float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
+    float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
+    float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
     return vec3(
-        gx * uSize.x * 0.46,
-        gy * uSize.y * 0.44 + wave * minDim * 0.055,
-        220.0 + wave * 260.0 + wave2 * 160.0 + hash11(id + seed) * 180.0
+        cos(angle) * baseR * pulse * aspectX,
+        sin(angle) * baseR * pulse,
+        120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
     );
 }
 
@@ -238,8 +206,17 @@ void main() {
     float alpha = edgeFade * lifeFadeIn * lifeFadeOut * sat(0.25 + scale * 0.95);
     if (glitching > 0.5) alpha *= mix(0.35, 1.0, hash11(frameKey + seed * 11.0));
 
-    float hueDeg = mod(uTime * 16.0 + (1.0 - scale) * 42.0 + mod(id, 9.0) * 2.4, 360.0);
-    vec3 rgb = hsl2rgb(hueDeg / 360.0, 0.96, glitching > 0.5 ? 0.76 : 0.69);
+    // Palette 4 lớp (kỹ thuật Gemini): chọn lớp theo thời gian, nội suy
+    // core -> accent theo chiều sâu để giữ sắc độ ổn định thay vì HSL quay vòng.
+    float layerF = mod(uTime * 0.08 + seed * 0.37, 4.0);
+    int li = int(layerF);
+    int ni = int(mod(layerF + 1.0, 4.0));
+    float lt = fract(layerF);
+    vec3 pc = mix(uCore[li], uCore[ni], lt);
+    vec3 pa = mix(uAccent[li], uAccent[ni], lt);
+    float coreMix = clamp((1.0 - scale) * 1.25, 0.0, 1.0);
+    vec3 rgb = mix(pc, pa, coreMix);
+    if (glitching > 0.5) rgb = min(vec3(1.0), rgb * 1.25);
     vColor = vec4(rgb, alpha);
 
     float glitchSym = floor(hash11(frameKey * 13.0 + seed * 31.0 + id) * 9.0);
@@ -270,6 +247,7 @@ void main() {
 }
 """
 
+// ───────────────────────── WALLPAPER SERVICE ─────────────────────────
 class GlyphSpaceWallpaperService : WallpaperService() {
     override fun onCreateEngine(): Engine = KEngine()
 
@@ -306,11 +284,17 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locCamera = -1
         private var locDpr = -1
         private var locFocal = -1
+        private var locCore = -1
+        private var locAccent = -1
         private var locTex = -1
 
         private var w = 0
         private var h = 0
         private var glyphCount = 0
+
+        // Palette 4 lớp (kỹ thuật Gemini): nạp hex -> float[3] trong init.
+        private val coreArr = FloatArray(12)
+        private val accentArr = FloatArray(12)
 
         private var lastFrameAt = 0L
         private var timeSec = 0f
@@ -344,6 +328,20 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var downX = 0f
         private var downY = 0f
         private var dragging = false
+
+        init {
+            fillColors(coreArr, K_PALETTE_CORE)
+            fillColors(accentArr, K_PALETTE_ACCENT)
+        }
+
+        private fun fillColors(dst: FloatArray, hex: List<String>) {
+            hex.forEachIndexed { i, s ->
+                val c = Color.parseColor(s)
+                dst[i * 3] = Color.red(c) / 255f
+                dst[i * 3 + 1] = Color.green(c) / 255f
+                dst[i * 3 + 2] = Color.blue(c) / 255f
+            }
+        }
 
         private val loop = object : Runnable {
             override fun run() {
@@ -534,6 +532,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             haveBaseline = false
         }
 
+        // ── EGL / GL ──
         private fun initEGL(holder: SurfaceHolder): Boolean {
             dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
             if (dpy == EGL14.EGL_NO_DISPLAY) return false
@@ -605,6 +604,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locCamera = GLES20.glGetUniformLocation(prog, "uCamera")
             locDpr = GLES20.glGetUniformLocation(prog, "uDpr")
             locFocal = GLES20.glGetUniformLocation(prog, "uFocal")
+            locCore = GLES20.glGetUniformLocation(prog, "uCore")
+            locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
 
             buildAtlas()
@@ -690,6 +691,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, glyphCount * 8 * 4, buf, GLES20.GL_STATIC_DRAW)
         }
 
+        // ── khung hình ──
         private fun drawFrame(now: Long) {
             if (!glReady || w <= 0 || h <= 0 || glyphCount <= 0) return
             try {
@@ -701,7 +703,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 if (transitioning) {
                     transitionT = ((now - transitionStartAt).toFloat() / K_TRANSITION_MS).coerceIn(0f, 1f)
                     if (transitionT >= 1f) {
-                        modeIndex = (modeIndex + 1) % 7
+                        modeIndex = (modeIndex + 1) % 4
                         transitioning = false
                         transitionT = 0f
                     }
@@ -719,7 +721,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUseProgram(prog)
                 GLES20.glUniform1f(locTime, timeSec)
                 GLES20.glUniform1f(locMode, modeIndex.toFloat())
-                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 7).toFloat())
+                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 4).toFloat())
                 GLES20.glUniform1f(locTransitionT, transitionT)
                 GLES20.glUniform1f(locTransitioning, if (transitioning) 1f else 0f)
                 GLES20.glUniform1f(locTransitionSerial, transitionSerial)
@@ -728,6 +730,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUniform2f(locCamera, cameraX, cameraY)
                 GLES20.glUniform1f(locDpr, dpr)
                 GLES20.glUniform1f(locFocal, K_FOCAL)
+                GLES20.glUniform3fv(locCore, 4, coreArr, 0)
+                GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
 
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
