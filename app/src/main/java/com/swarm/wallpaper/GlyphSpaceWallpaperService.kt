@@ -44,7 +44,7 @@ import kotlin.random.Random
 // adaptive FPS, power saver, sensor low-pass, lifecycle dừng render khi ẩn.
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val K_FPS = 30
+private const val K_FPS = 60
 private const val K_FPS_ACTIVE = 60
 private const val K_FPS_SAVER = 15
 private const val K_TRANSITION_MS = 850L
