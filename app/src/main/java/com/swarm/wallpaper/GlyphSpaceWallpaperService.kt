@@ -29,8 +29,6 @@ import android.view.SurfaceHolder
 import android.view.ViewConfiguration
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.Calendar
-
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -45,6 +43,7 @@ import kotlin.random.Random
 // Tối ưu theo kiến trúc: EGL + GLES2, VBO tĩnh, glyph texture atlas,
 // adaptive FPS, power saver, sensor low-pass, lifecycle dừng render khi ẩn.
 
+// ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
 private const val K_FPS = 30
 private const val K_FPS_ACTIVE = 60
 private const val K_FPS_SAVER = 15
@@ -53,16 +52,21 @@ private const val K_FOCAL = 520f
 private const val K_MAX_DPR = 1.75f
 private const val K_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
 private const val K_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
-private const val K_SYMBOLS_MATRIX = "01ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎ"
-private const val K_SYMBOLS_MATRIX_FALLBACK = "0123456789"
 private const val K_TILT_SMOOTH_HZ = 4.5f
 private const val K_TILT_X_PER_DEG = 1.35f
 private const val K_TILT_Y_PER_DEG = 1.00f
 private const val K_TILT_LIMIT_DEG = 35f
 private const val K_SENSOR_STILL_EPS_DEG = 0.20f
 
+// Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
+// shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
+private val K_PALETTE_CORE = listOf("#00B95C", "#FFCC00", "#FF4641", "#3186FF")
+private val K_PALETTE_ACCENT = listOf("#00A5B7", "#FF6B2B", "#D8627E", "#A975AA")
+
+// ───────────────────────── SHADER ─────────────────────────
 // aA = id, seed, phase, speed
 // aB = size, life, ageOffset, symbolIndex
+// Toàn bộ công thức hình học + màu + vòng đời chạy trên GPU.
 private const val K_VERT = """
 precision highp float;
 
@@ -80,12 +84,11 @@ uniform vec2 uSize;      // logical CSS-like pixels
 uniform vec2 uCamera;    // logical pixels
 uniform float uDpr;
 uniform float uFocal;
-uniform float uHourAngle;
-uniform float uMinuteAngle;
+uniform vec3 uCore[4];    // màu lõi 4 lớp (kỹ thuật Gemini)
+uniform vec3 uAccent[4];  // màu viền 4 lớp
 
 varying vec4 vColor;
 varying float vSym;
-varying float vAtlas;
 
 float hash11(float p) {
     return fract(sin(p * 127.1 + 311.7) * 43758.5453123);
@@ -140,96 +143,17 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
         return vec3(col + pulse, travel, 40.0 + depthCycle);
     }
 
-    if (mode < 3.5) { // PULSE: 12-way symmetry, no geometric core
-        float branch = mod(id, 12.0);
-        float layer = floor(id / 12.0);
-        float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
-        float pul = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
-        float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
-        return vec3(
-            cos(angle) * baseR * pul * aspectX,
-            sin(angle) * baseR * pul,
-            120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
-        );
-    }
-
-    if (mode < 4.5) { // ORBIT + PULSE
-        if (mod(id, 2.0) < 0.5) {
-            float lane12 = mod(id, 12.0);
-            float ring = 0.13 + (lane12 / 11.0) * 0.42;
-            float radius = minDim * ring;
-            float a = phase + t * speed * 0.34 + lane12 * 3.14159265359 / 6.0;
-            float wobble = sin(t * 0.7 + seed) * minDim * 0.035;
-            return vec3(
-                cos(a) * (radius + wobble) * aspectX,
-                sin(a) * radius * 0.58,
-                130.0 + sin(a * 1.7 + seed) * 310.0
-            );
-        }
-        float branch = mod(id, 12.0);
-        float layer = floor(id / 12.0);
-        float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
-        float pul = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
-        float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
-        return vec3(
-            cos(angle) * baseR * pul * aspectX,
-            sin(angle) * baseR * pul,
-            120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
-        );
-    }
-
-    if (mode < 5.5) { // DRIFT + MATRIX
-        if (mod(id, 2.0) < 0.5) {
-            float spanX = uSize.x * 0.72;
-            float spanY = uSize.y * 0.62;
-            float x = sin(t * 0.13 * speed + seed * 0.7) * spanX
-                    + cos(t * 0.05 + seed) * spanX * 0.25;
-            float y = cos(t * 0.11 * speed + seed * 1.2) * spanY
-                    + sin(t * 0.07 + seed * 0.3) * spanY * 0.22;
-            float z = 80.0 + ((sin(t * 0.19 + seed * 2.2) + 1.0) * 0.5) * 520.0;
-            return vec3(x, y, z);
-        }
-        float lane = mod(id, 13.0) - 6.0;
-        float col = lane * (uSize.x / 14.0);
-        float travel = mod(t * (90.0 + speed * 130.0) + seed * 800.0, uSize.y * 1.7)
-                     - uSize.y * 0.85;
-        float pulse2 = sin(t * 0.8 + seed) * 18.0;
-        float depthCycle = mod(t * (70.0 + speed * 55.0) + seed * 500.0, 720.0);
-        return vec3(col + pulse2, travel, 40.0 + depthCycle);
-    }
-
-    if (mode < 6.5) { // CLOCK: viền 12 giờ tĩnh + kim giờ/phút theo giờ hệ thống
-        float ring14 = mod(id, 14.0);
-        float layer = floor(id / 14.0);
-        if (ring14 < 12.0) {
-            float a = ring14 * (3.14159265359 / 6.0);
-            float r = minDim * (0.40 + mod(layer, 3.0) * 0.02);
-            return vec3(sin(a) * r * aspectX, -cos(a) * r, 160.0);
-        }
-        if (ring14 < 13.0) {
-            float seg = mod(layer, 6.0);
-            float r = minDim * (0.05 + seg * 0.028);
-            return vec3(sin(uHourAngle) * r * aspectX, -cos(uHourAngle) * r, 140.0);
-        }
-        float seg = mod(layer, 9.0);
-        float r = minDim * (0.05 + seg * 0.032);
-        return vec3(sin(uMinuteAngle) * r * aspectX, -cos(uMinuteAngle) * r, 150.0);
-    }
-
-    // MATRIX REAL: cùng chuyển động cột rơi, dùng atlas ký tự Matrix riêng (xem vAtlas)
-    float laneR = mod(id, 13.0) - 6.0;
-    float colR = laneR * (uSize.x / 14.0);
-    float travelR = mod(t * (90.0 + speed * 130.0) + seed * 800.0, uSize.y * 1.7)
-                 - uSize.y * 0.85;
-    float pulseR = sin(t * 0.8 + seed) * 18.0;
-    float depthCycleR = mod(t * (70.0 + speed * 55.0) + seed * 500.0, 720.0);
-    return vec3(colR + pulseR, travelR, 40.0 + depthCycleR);
-}
-
-float sizeMulForMode(float m) {
-    if (m > 0.5 && m < 2.5) return 3.0;  // DRIFT hoặc MATRIX
-    if (m > 4.5 && m < 5.5) return 3.0;  // DRIFT + MATRIX
-    return 1.0;
+    // PULSE: 12-way symmetry, no geometric core
+    float branch = mod(id, 12.0);
+    float layer = floor(id / 12.0);
+    float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
+    float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
+    float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
+    return vec3(
+        cos(angle) * baseR * pulse * aspectX,
+        sin(angle) * baseR * pulse,
+        120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
+    );
 }
 
 void main() {
@@ -254,9 +178,6 @@ void main() {
     float z = clamp(p.z, 0.0, 900.0);
     float scale = uFocal / (uFocal + z);
     float depthParallax = 0.35 + (1.0 - scale) * 1.4;
-    float sMul = uTransitioning > 0.5
-        ? mix(sizeMulForMode(uMode), sizeMulForMode(uNextMode), ease3(uTransitionT))
-        : sizeMulForMode(uMode);
 
     float sx = uSize.x * 0.5 + (p.x - uCamera.x * depthParallax) * scale;
     float sy = uSize.y * 0.5 + (p.y - uCamera.y * depthParallax) * scale;
@@ -285,20 +206,28 @@ void main() {
     float alpha = edgeFade * lifeFadeIn * lifeFadeOut * sat(0.25 + scale * 0.95);
     if (glitching > 0.5) alpha *= mix(0.35, 1.0, hash11(frameKey + seed * 11.0));
 
-    float hueDeg = mod(uTime * 16.0 + (1.0 - scale) * 42.0 + mod(id, 9.0) * 2.4, 360.0);
-    vec3 rgb = hsl2rgb(hueDeg / 360.0, 0.96, glitching > 0.5 ? 0.88 : 0.80);
+    // Palette 4 lớp (kỹ thuật Gemini): chọn lớp theo thời gian, nội suy
+    // core -> accent theo chiều sâu để giữ sắc độ ổn định thay vì HSL quay vòng.
+    float layerF = mod(uTime * 0.08 + seed * 0.37, 4.0);
+    int li = int(layerF);
+    int ni = int(mod(layerF + 1.0, 4.0));
+    float lt = fract(layerF);
+    vec3 pc = mix(uCore[li], uCore[ni], lt);
+    vec3 pa = mix(uAccent[li], uAccent[ni], lt);
+    float coreMix = clamp((1.0 - scale) * 1.25, 0.0, 1.0);
+    vec3 rgb = mix(pc, pa, coreMix);
+    if (glitching > 0.5) rgb = min(vec3(1.0), rgb * 1.25);
     vColor = vec4(rgb, alpha);
 
     float glitchSym = floor(hash11(frameKey * 13.0 + seed * 31.0 + id) * 9.0);
     float swapGate = step(hash11(frameKey + seed * 7.0), 0.72);
     vSym = mix(baseSym, glitchSym, glitching * swapGate);
-    vAtlas = uTransitioning > 0.5 ? step(6.5, uNextMode) : step(6.5, uMode);
 
     // logical pixels -> clip space. Android viewport tự scale lên physical pixels.
     float cx = sx / uSize.x * 2.0 - 1.0;
     float cy = 1.0 - sy / uSize.y * 2.0;
     gl_Position = vec4(cx, cy, 0.0, 1.0);
-    gl_PointSize = max(8.0, baseSize * sMul * scale) * uDpr;
+    gl_PointSize = max(8.0, baseSize * scale) * uDpr;
 }
 """
 
@@ -306,13 +235,11 @@ private const val K_FRAG = """
 precision mediump float;
 varying vec4 vColor;
 varying float vSym;
-varying float vAtlas;
 uniform sampler2D uTex;
 
 void main() {
     vec2 uv = gl_PointCoord;
     uv.x = (uv.x + vSym) / 16.0;
-    uv.y = (uv.y + vAtlas) / 2.0;
     vec4 t = texture2D(uTex, uv);
     float a = t.a * vColor.a;
     if (a < 0.01) discard;
@@ -320,6 +247,7 @@ void main() {
 }
 """
 
+// ───────────────────────── WALLPAPER SERVICE ─────────────────────────
 class GlyphSpaceWallpaperService : WallpaperService() {
     override fun onCreateEngine(): Engine = KEngine()
 
@@ -356,13 +284,17 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locCamera = -1
         private var locDpr = -1
         private var locFocal = -1
+        private var locCore = -1
+        private var locAccent = -1
         private var locTex = -1
-        private var locHourAngle = -1
-        private var locMinuteAngle = -1
 
         private var w = 0
         private var h = 0
         private var glyphCount = 0
+
+        // Palette 4 lớp (kỹ thuật Gemini): nạp hex -> float[3] trong init.
+        private val coreArr = FloatArray(12)
+        private val accentArr = FloatArray(12)
 
         private var lastFrameAt = 0L
         private var timeSec = 0f
@@ -396,6 +328,20 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var downX = 0f
         private var downY = 0f
         private var dragging = false
+
+        init {
+            fillColors(coreArr, K_PALETTE_CORE)
+            fillColors(accentArr, K_PALETTE_ACCENT)
+        }
+
+        private fun fillColors(dst: FloatArray, hex: List<String>) {
+            hex.forEachIndexed { i, s ->
+                val c = Color.parseColor(s)
+                dst[i * 3] = Color.red(c) / 255f
+                dst[i * 3 + 1] = Color.green(c) / 255f
+                dst[i * 3 + 2] = Color.blue(c) / 255f
+            }
+        }
 
         private val loop = object : Runnable {
             override fun run() {
@@ -586,6 +532,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             haveBaseline = false
         }
 
+        // ── EGL / GL ──
         private fun initEGL(holder: SurfaceHolder): Boolean {
             dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
             if (dpy == EGL14.EGL_NO_DISPLAY) return false
@@ -657,9 +604,9 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locCamera = GLES20.glGetUniformLocation(prog, "uCamera")
             locDpr = GLES20.glGetUniformLocation(prog, "uDpr")
             locFocal = GLES20.glGetUniformLocation(prog, "uFocal")
+            locCore = GLES20.glGetUniformLocation(prog, "uCore")
+            locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
-            locHourAngle = GLES20.glGetUniformLocation(prog, "uHourAngle")
-            locMinuteAngle = GLES20.glGetUniformLocation(prog, "uMinuteAngle")
 
             buildAtlas()
             val ids = IntArray(1)
@@ -682,21 +629,13 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             if (syms.isEmpty()) syms = listOf("+")
             syms = syms.take(16)
 
-            var symsMatrix = K_SYMBOLS_MATRIX.map { it.toString() }.filter { p.hasGlyph(it) }
-            if (symsMatrix.isEmpty()) symsMatrix = K_SYMBOLS_MATRIX_FALLBACK.map { it.toString() }.filter { p.hasGlyph(it) }
-            if (symsMatrix.isEmpty()) symsMatrix = listOf("1")
-            symsMatrix = symsMatrix.take(16)
-
-            // Atlas 2 hàng: hàng trên = symbol thường (vAtlas=0), hàng dưới = symbol Matrix (vAtlas=1).
-            val bmp = Bitmap.createBitmap(1024, 128, Bitmap.Config.ARGB_8888)
+            val bmp = Bitmap.createBitmap(1024, 64, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
             val fm = p.fontMetrics
             val baseline = 32f - (fm.ascent + fm.descent) / 2f
-            val baseline2 = 96f - (fm.ascent + fm.descent) / 2f
             // Lấp đủ 16 cell bằng cách lặp symbol khả dụng để fallback font không tạo ô rỗng.
             for (i in 0 until 16) {
                 canvas.drawText(syms[i % syms.size], i * 64f + 32f, baseline, p)
-                canvas.drawText(symsMatrix[i % symsMatrix.size], i * 64f + 32f, baseline2, p)
             }
 
             val ids = IntArray(1)
@@ -752,6 +691,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, glyphCount * 8 * 4, buf, GLES20.GL_STATIC_DRAW)
         }
 
+        // ── khung hình ──
         private fun drawFrame(now: Long) {
             if (!glReady || w <= 0 || h <= 0 || glyphCount <= 0) return
             try {
@@ -763,19 +703,11 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 if (transitioning) {
                     transitionT = ((now - transitionStartAt).toFloat() / K_TRANSITION_MS).coerceIn(0f, 1f)
                     if (transitionT >= 1f) {
-                        modeIndex = (modeIndex + 1) % 8
+                        modeIndex = (modeIndex + 1) % 4
                         transitioning = false
                         transitionT = 0f
                     }
                 }
-
-                val cal = Calendar.getInstance()
-                val hour24 = cal.get(Calendar.HOUR_OF_DAY)
-                val minute = cal.get(Calendar.MINUTE)
-                val second = cal.get(Calendar.SECOND)
-                val hourFrac = (hour24 % 12) + minute / 60f
-                val hourAngle = hourFrac / 12f * (2f * PI.toFloat())
-                val minuteAngle = (minute + second / 60f) / 60f * (2f * PI.toFloat())
 
                 val camA = 1f - exp(-2f * PI.toFloat() * K_TILT_SMOOTH_HZ * dt)
                 cameraX += (targetCameraX - cameraX) * camA
@@ -789,9 +721,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUseProgram(prog)
                 GLES20.glUniform1f(locTime, timeSec)
                 GLES20.glUniform1f(locMode, modeIndex.toFloat())
-                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 8).toFloat())
-                GLES20.glUniform1f(locHourAngle, hourAngle)
-                GLES20.glUniform1f(locMinuteAngle, minuteAngle)
+                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 4).toFloat())
                 GLES20.glUniform1f(locTransitionT, transitionT)
                 GLES20.glUniform1f(locTransitioning, if (transitioning) 1f else 0f)
                 GLES20.glUniform1f(locTransitionSerial, transitionSerial)
@@ -800,6 +730,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUniform2f(locCamera, cameraX, cameraY)
                 GLES20.glUniform1f(locDpr, dpr)
                 GLES20.glUniform1f(locFocal, K_FOCAL)
+                GLES20.glUniform3fv(locCore, 4, coreArr, 0)
+                GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
 
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
