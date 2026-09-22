@@ -41,7 +41,7 @@ private const val G_PET_PARTICLES = 500   // số hạt tạo nên con pet
 private const val G_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
 
-private class GWave(var radius: Float, val state: Int)
+private class KWave(var radius: Float, val state: Int)
 
 // ───────────────────────── SHADER ─────────────────────────
 // Toàn bộ công thức hình học + màu + sóng từ file HTML gốc, chạy trên GPU.
@@ -217,7 +217,7 @@ class KaleidoWallpaperService : WallpaperService() {
         private var morph = (-PI / 2).toFloat()
         private var stateIndex = 0
         private var lastWaveAt = 0L
-        private val waves = ArrayList<GWave>()
+        private val waves = ArrayList<KWave>()
         private val waveArr = FloatArray(16)
         private val coreArr = FloatArray(12)
         private val accentArr = FloatArray(12)
@@ -314,7 +314,7 @@ class KaleidoWallpaperService : WallpaperService() {
             if (now - lastWaveAt < 300) return
             lastWaveAt = now
             stateIndex = (stateIndex + 1) % 4
-            waves.add(GWave(0f, stateIndex))
+            waves.add(KWave(0f, stateIndex))
             if (waves.size > 4) waves.removeAt(0)
         }
 
