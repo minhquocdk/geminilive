@@ -36,17 +36,9 @@ private const val G_FPS = 60              // fps bình thường
 private const val G_FPS_SAVER = 15        // fps khi bật Tiết kiệm pin
 private const val G_AUTO_WAVE_MS = 8000L  // tự bắn sóng đổi màu mỗi N ms (0 = tắt, chỉ chạm mới đổi)
 private const val G_SPARK_N = 0.7f        // độ "nhọn" của hình sparkle
-private const val G_SIZE_BOOST = 1.6f     // nhân kích thước ký tự cho dễ nhìn trên màn hình nhỏ
-private const val G_PET_PARTICLES = 500   // số hạt tạo nên con pet
+private const val G_SIZE_BOOST = 1.6f     // (mặc định) nhân kích thước ký tự; có thể vuốt để chỉnh
 private const val G_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
-
-// ── pool glyph cho pet (thuần ký tự: body + mắt + miệng đều là glyph) ──
-private const val PET_BODY_SYMBOLS  = "⌬❂❋✺☬⬢⎈⍟⊛✦✧◆"   // lúc tỉnh / dạo
-private const val PET_SLEEP_SYMBOLS = "☾◐◯◌◍○"           // khi ngủ
-private const val PET_PLAY_SYMBOLS  = "✺✹❋✵✦✧"           // khi mood cao
-private const val PET_EYE_SYMBOLS   = "•○●◉◕◔"           // mắt
-private const val PET_MOUTH_SYMBOLS = "‿◡ωᴗ"              // miệng
 
 private class KWave(var radius: Float, val state: Int)
 
@@ -122,44 +114,6 @@ void main() {
 }
 """
 
-// ───────────────────────── PET SHADER ─────────────────────────
-// Pet vẽ bằng quad textured glyph — thuần ký tự, không có hình tròn solid.
-// Không dùng gl_PointSize vì nhiều GPU giới hạn point size ~64px.
-private const val PET_VERT = """
-attribute vec2 aQuad;     // x,y trong [-0.5, 0.5]
-attribute vec2 aUV;       // uv trong ô glyph
-uniform mat4 uMV;
-uniform mat4 uProj;
-uniform vec2 uPetPos;
-uniform float uSize;
-uniform float uRot;
-uniform float uGlyphIdx;
-varying vec2 vUV;
-
-void main() {
-    float c = cos(uRot);
-    float s = sin(uRot);
-    vec2 p = vec2(aQuad.x * c - aQuad.y * s,
-                  aQuad.x * s + aQuad.y * c) * uSize;
-    vec4 world = uMV * vec4(p + uPetPos, 0.0, 1.0);
-    gl_Position = uProj * world;
-    vUV = vec2((aUV.x + uGlyphIdx) / 16.0, aUV.y);
-}
-"""
-
-private const val PET_FRAG = """
-precision mediump float;
-varying vec2 vUV;
-uniform sampler2D uTex;
-uniform vec3 uColor;
-
-void main() {
-    vec4 t = texture2D(uTex, vUV);
-    if (t.a < 0.1) discard;
-    gl_FragColor = vec4(uColor, t.a);
-}
-"""
-
 // ───────────────────────── WALLPAPER SERVICE ─────────────────────────
 class KaleidoWallpaperService : WallpaperService() {
 
@@ -192,45 +146,7 @@ class KaleidoWallpaperService : WallpaperService() {
         private var locAccent = 0
         private var locTex = 0
 
-        // pet (port từ aqua.html)
-        private var petProg = 0
-        private var petVbo = 0
-        private var petTex = 0
-        private var petLocQuad = 0
-        private var petLocUV = 0
-        private var petLocMV = 0
-        private var petLocProj = 0
-        private var petLocPos = 0
-        private var petLocSize = 0
-        private var petLocRot = 0
-        private var petLocGlyph = 0
-        private var petLocColor = 0
-        private var petLocTex = 0
         private var glyphCount = 16
-
-        // pool glyph pet (thuần ký tự)
-        private var petBodyGlyphs: IntArray = intArrayOf(0)
-        private var petSleepGlyphs: IntArray = intArrayOf(0)
-        private var petPlayGlyphs: IntArray = intArrayOf(0)
-        private var petEyeGlyphs: IntArray = intArrayOf(0)
-        private var petMouthGlyphs: IntArray = intArrayOf(0)
-        private var petBodyIdx = 0
-        private var petSleepIdx = 0
-        private var petPlayIdx = 0
-        private var petEyeIdx = 0
-        private var petMouthIdx = 0
-
-        private var petX = 40f
-        private var petY = 0f
-        private var petTX = 40f
-        private var petTY = 0f
-        private var petEnergy = 88f
-        private var petMood = 72f
-        private var petHunger = 25f
-        private var petNeedsAcc = 0f
-        private var petNextDecisionAt = 0L
-        private var petSleeping = false
-        private var petWobble = 0f
 
         private var w = 0
         private var h = 0
@@ -244,6 +160,23 @@ class KaleidoWallpaperService : WallpaperService() {
         private var morph = (-PI / 2).toFloat()
         private var stateIndex = 0
         private var lastWaveAt = 0L
+
+        // ── thông số chỉnh bằng gesture (mặc định lấy từ hằng số ở trên) ──
+        private var sizeBoost = G_SIZE_BOOST
+        private var sparkN = G_SPARK_N
+        private var rotSpeed = 1f
+        private var waveSpeed = 1f
+        private var camZoom = 1f
+        private var autoWaveMs = G_AUTO_WAVE_MS
+
+        // ── gesture state machine: 0=rảnh, 1=1 ngón, 2=2 ngón, 3=3 ngón ──
+        private var gestureMode = 0
+        private var gLastX = 0f
+        private var gLastY = 0f
+        private var gLastDist = 0f
+        private var gDownAt = 0L
+        private var gMoved = 0f
+
         private val waves = ArrayList<KWave>()
         private val waveArr = FloatArray(16)
         private val coreArr = FloatArray(12)
@@ -320,14 +253,146 @@ class KaleidoWallpaperService : WallpaperService() {
             super.onDestroy()
         }
 
-        // chạm màn hình → sóng đổi màu
+        // ── gesture state machine: vuốt 1/2/3 ngón để chỉnh thông số ──
+        //  1 ngón dọc     → kích thước hạt (sizeBoost)
+        //  1 ngón ngang   → độ nhọn sparkle (sparkN)
+        //  2 ngón dọc     → tốc độ xoay tổng thể (rotSpeed)
+        //  2 ngón ngang   → tốc độ lan sóng màu (waveSpeed)
+        //  2 ngón chụm/mở → zoom camera (camZoom)
+        //  3 ngón dọc     → chu kỳ tự bắn sóng đổi màu (autoWaveMs, 0 = tắt)
+        //  tap 1 ngón     → bắn sóng đổi màu
+        //  tap 3 ngón     → reset về giá trị mặc định
         override fun onTouchEvent(event: MotionEvent) {
-            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                triggerWave(SystemClock.uptimeMillis())
-                petMood = minOf(100f, petMood + 5f)
-                petEnergy = maxOf(0f, petEnergy - 1.5f)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    gestureMode = 1
+                    beginGesture(event)
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    gestureMode = when {
+                        event.pointerCount >= 3 -> 3
+                        event.pointerCount == 2 -> 2
+                        else -> 1
+                    }
+                    beginGesture(event)
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    gestureMode = when {
+                        event.pointerCount - 1 >= 3 -> 3
+                        event.pointerCount - 1 == 2 -> 2
+                        event.pointerCount - 1 == 1 -> 1
+                        else -> 0
+                    }
+                    beginGesture(event)
+                }
+                MotionEvent.ACTION_MOVE -> handleMove(event)
+                MotionEvent.ACTION_UP -> {
+                    val quick = SystemClock.uptimeMillis() - gDownAt < 300L
+                    val tap = gMoved < 20f
+                    when {
+                        gestureMode == 1 && quick && tap -> triggerWave(SystemClock.uptimeMillis())
+                        gestureMode == 3 && quick && tap -> resetParams()
+                    }
+                    gestureMode = 0
+                }
+                MotionEvent.ACTION_CANCEL -> gestureMode = 0
             }
             super.onTouchEvent(event)
+        }
+
+        private fun beginGesture(event: MotionEvent) {
+            gLastX = avgX(event)
+            gLastY = avgY(event)
+            gLastDist = spread(event)
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                gDownAt = SystemClock.uptimeMillis()
+                gMoved = 0f
+            }
+        }
+
+        private fun handleMove(event: MotionEvent) {
+            if (gestureMode == 0) return
+            val x = avgX(event)
+            val y = avgY(event)
+            val dx = x - gLastX
+            val dy = y - gLastY
+            val dist = spread(event)
+            val dDist = if (gLastDist > 0f && dist > 0f) dist - gLastDist else 0f
+
+            when (gestureMode) {
+                1 -> {
+                    if (kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
+                        sparkN = (sparkN + dx * 0.004f).coerceIn(0f, 1.5f)
+                    } else {
+                        sizeBoost = (sizeBoost - dy * 0.006f).coerceIn(0.4f, 4.0f)
+                    }
+                    gMoved += kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                }
+                2 -> {
+                    val dragMag = kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                    if (kotlin.math.abs(dDist) > dragMag * 1.2f && gLastDist > 1f && dist > 1f) {
+                        camZoom = (camZoom * (gLastDist / dist)).coerceIn(0.4f, 3.0f)
+                    } else if (kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
+                        waveSpeed = (waveSpeed + dx * 0.004f).coerceIn(0.1f, 5.0f)
+                    } else {
+                        rotSpeed = (rotSpeed - dy * 0.005f).coerceIn(0f, 4.0f)
+                    }
+                    gMoved += dragMag
+                }
+                3 -> {
+                    autoWaveMs = (autoWaveMs - (dy * 30f).toLong()).coerceIn(0L, 20000L)
+                    gMoved += kotlin.math.abs(dy)
+                }
+            }
+
+            gLastX = x
+            gLastY = y
+            gLastDist = dist
+        }
+
+        private fun resetParams() {
+            sizeBoost = G_SIZE_BOOST
+            sparkN = G_SPARK_N
+            rotSpeed = 1f
+            waveSpeed = 1f
+            camZoom = 1f
+            autoWaveMs = G_AUTO_WAVE_MS
+        }
+
+        private fun avgX(e: MotionEvent): Float {
+            val skip = if (e.actionMasked == MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
+            var s = 0f
+            var n = 0
+            for (i in 0 until e.pointerCount) {
+                if (i == skip) continue
+                s += e.getX(i); n++
+            }
+            return if (n == 0) 0f else s / n
+        }
+
+        private fun avgY(e: MotionEvent): Float {
+            val skip = if (e.actionMasked == MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
+            var s = 0f
+            var n = 0
+            for (i in 0 until e.pointerCount) {
+                if (i == skip) continue
+                s += e.getY(i); n++
+            }
+            return if (n == 0) 0f else s / n
+        }
+
+        private fun spread(e: MotionEvent): Float {
+            val skip = if (e.actionMasked == MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
+            var i0 = -1
+            var i1 = -1
+            for (i in 0 until e.pointerCount) {
+                if (i == skip) continue
+                if (i0 < 0) i0 = i else if (i1 < 0) { i1 = i; break }
+            }
+            if (i0 < 0 || i1 < 0) return 0f
+            val dx = e.getX(i0) - e.getX(i1)
+            val dy = e.getY(i0) - e.getY(i1)
+            return kotlin.math.sqrt(dx * dx + dy * dy)
         }
 
         override fun onCommand(
@@ -408,7 +473,6 @@ class KaleidoWallpaperService : WallpaperService() {
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
 
             glyphCount = buildAtlas().coerceAtLeast(1)
-            buildPetAtlas()
             val symCount = glyphCount
 
             // dữ liệu hạt: angle, rad, zOffset, speed, symbol (5 float / hạt)
@@ -428,90 +492,7 @@ class KaleidoWallpaperService : WallpaperService() {
             vbo = ids[0]
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_PARTICLES * 5 * 4, buf, GLES20.GL_STATIC_DRAW)
-            if (!createPet()) return false
             return true
-        }
-
-        // ── Pet: program riêng + quad textured glyph ──
-        private fun createPet(): Boolean {
-            val vs = compile(GLES20.GL_VERTEX_SHADER, PET_VERT)
-            val fs = compile(GLES20.GL_FRAGMENT_SHADER, PET_FRAG)
-            if (vs == 0 || fs == 0) return false
-            petProg = GLES20.glCreateProgram()
-            GLES20.glAttachShader(petProg, vs)
-            GLES20.glAttachShader(petProg, fs)
-            GLES20.glLinkProgram(petProg)
-            val st = IntArray(1)
-            GLES20.glGetProgramiv(petProg, GLES20.GL_LINK_STATUS, st, 0)
-            if (st[0] == 0) return false
-
-            petLocQuad = GLES20.glGetAttribLocation(petProg, "aQuad")
-            petLocUV = GLES20.glGetAttribLocation(petProg, "aUV")
-            petLocMV = GLES20.glGetUniformLocation(petProg, "uMV")
-            petLocProj = GLES20.glGetUniformLocation(petProg, "uProj")
-            petLocPos = GLES20.glGetUniformLocation(petProg, "uPetPos")
-            petLocSize = GLES20.glGetUniformLocation(petProg, "uSize")
-            petLocRot = GLES20.glGetUniformLocation(petProg, "uRot")
-            petLocGlyph = GLES20.glGetUniformLocation(petProg, "uGlyphIdx")
-            petLocColor = GLES20.glGetUniformLocation(petProg, "uColor")
-            petLocTex = GLES20.glGetUniformLocation(petProg, "uTex")
-
-            // 4 đỉnh TRIANGLE_STRIP: BL, BR, TL, TR
-            // mỗi đỉnh 4 float (x, y, u, v)
-            val quad = floatArrayOf(
-                -0.5f, -0.5f, 0f, 1f,
-                 0.5f, -0.5f, 1f, 1f,
-                -0.5f,  0.5f, 0f, 0f,
-                 0.5f,  0.5f, 1f, 0f
-            )
-            val buf = ByteBuffer.allocateDirect(quad.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-            buf.put(quad); buf.position(0)
-            val ids = IntArray(1)
-            GLES20.glGenBuffers(1, ids, 0)
-            petVbo = ids[0]
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, petVbo)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, quad.size * 4, buf, GLES20.GL_STATIC_DRAW)
-            return true
-        }
-
-        // Logic pet đơn giản port từ aqua.html: nhu cầu + bơi lượn
-        private fun updatePet(dt: Float, now: Long) {
-            petNeedsAcc += dt
-            if (petNeedsAcc >= 1f) {
-                val s = petNeedsAcc.toInt()
-                petNeedsAcc -= s.toFloat()
-                if (petSleeping) {
-                    petEnergy = minOf(100f, petEnergy + 3f * s)
-                    if (petEnergy >= 70f) petSleeping = false
-                } else {
-                    petHunger = minOf(100f, petHunger + 0.72f * s)
-                    petEnergy = maxOf(0f, petEnergy - 0.24f * s)
-                    petMood = maxOf(0f, petMood - 0.04f * s)
-                    if (petEnergy < 18f) petSleeping = true
-                }
-            }
-            if (now >= petNextDecisionAt) {
-                petNextDecisionAt = now + 2500L + Random.nextLong(3000L)
-                if (petSleeping) {
-                    petTX = 0f
-                    petTY = 0f
-                } else {
-                    val ang = (Random.nextFloat() * 2f * PI).toFloat()
-                    val r = 30f + Random.nextFloat() * 55f
-                    petTX = kotlin.math.cos(ang) * r
-                    petTY = kotlin.math.sin(ang) * r * 0.55f
-                }
-            }
-            val dx = petTX - petX
-            val dy = petTY - petY
-            val d = kotlin.math.sqrt(dx * dx + dy * dy)
-            if (d > 0.5f) {
-                val speed = if (petSleeping) 3f else (12f * (0.5f + petEnergy / 200f))
-                val step = minOf(d, speed * dt)
-                petX += dx / d * step
-                petY += dy / d * step
-            }
-            petWobble += dt * (if (petSleeping) 1.2f else 2.4f)
         }
 
         // atlas ký tự: 16 ô 64px, chỉ dùng ký tự máy có font; thiếu thì dùng bộ dự phòng
@@ -547,67 +528,6 @@ class KaleidoWallpaperService : WallpaperService() {
             return syms.size
         }
 
-        // Atlas riêng cho pet: 16 ô 64px, layout [body.. | sleep.. | play.. | eye.. | mouth].
-        // Mỗi phiên chọn 1 glyph mỗi pool → pet có "cá tính" riêng mỗi lần bật wallpaper.
-        private fun buildPetAtlas() {
-            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
-                textSize = 42f
-                color = Color.WHITE
-                textAlign = Paint.Align.CENTER
-            }
-            fun pool(src: String, max: Int): List<String> {
-                val l = src.map { it.toString() }.filter { p.hasGlyph(it) }
-                val safe = if (l.isEmpty()) listOf("+") else l
-                return safe.take(max)
-            }
-            val body  = pool(PET_BODY_SYMBOLS,  6)
-            val sleep = pool(PET_SLEEP_SYMBOLS, 4)
-            val play  = pool(PET_PLAY_SYMBOLS,  3)
-            val eye   = pool(PET_EYE_SYMBOLS,   2)
-            val mouth = pool(PET_MOUTH_SYMBOLS, 1)
-
-            var cursor = 0
-            fun place(list: List<String>): IntArray {
-                val start = cursor
-                cursor += list.size
-                return IntArray(list.size) { start + it }
-            }
-            petBodyGlyphs  = place(body)
-            petSleepGlyphs = place(sleep)
-            petPlayGlyphs  = place(play)
-            petEyeGlyphs   = place(eye)
-            petMouthGlyphs = place(mouth)
-
-            petBodyIdx  = petBodyGlyphs[Random.nextInt(petBodyGlyphs.size)]
-            petSleepIdx = petSleepGlyphs[Random.nextInt(petSleepGlyphs.size)]
-            petPlayIdx  = petPlayGlyphs[Random.nextInt(petPlayGlyphs.size)]
-            petEyeIdx   = petEyeGlyphs[Random.nextInt(petEyeGlyphs.size)]
-            petMouthIdx = petMouthGlyphs[Random.nextInt(petMouthGlyphs.size)]
-
-            // Ghi cùng thứ tự lên bitmap để index khớp cursor ở trên
-            val ordered = body + sleep + play + eye + mouth
-            val bmp = Bitmap.createBitmap(1024, 64, Bitmap.Config.ARGB_8888)
-            val cv = Canvas(bmp)
-            val fm = p.fontMetrics
-            val baseY = 32f - (fm.ascent + fm.descent) / 2f
-            ordered.forEachIndexed { i, s ->
-                if (i < 16) cv.drawText(s, i * 64f + 32f, baseY, p)
-            }
-
-            val ids = IntArray(1)
-            GLES20.glGenTextures(1, ids, 0)
-            petTex = ids[0]
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, petTex)
-            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
-            GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            bmp.recycle()
-        }
-
         private fun releaseGL() {
             try {
                 if (dpy != EGL14.EGL_NO_DISPLAY) {
@@ -616,13 +536,7 @@ class KaleidoWallpaperService : WallpaperService() {
                         GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
                         GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
                         GLES20.glDeleteProgram(prog)
-                        if (petVbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(petVbo), 0)
-                        if (petTex != 0) GLES20.glDeleteTextures(1, intArrayOf(petTex), 0)
-                        if (petProg != 0) GLES20.glDeleteProgram(petProg)
                     }
-                    petVbo = 0
-                    petTex = 0
-                    petProg = 0
                     EGL14.eglMakeCurrent(dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
                     if (surf != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(dpy, surf)
                     if (ctx != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(dpy, ctx)
@@ -643,14 +557,13 @@ class KaleidoWallpaperService : WallpaperService() {
                 lastT = now
                 animTime += dt
                 morph += dt * 0.5f
-                updatePet(dt, now)
 
-                if (G_AUTO_WAVE_MS > 0 && now - lastWaveAt > G_AUTO_WAVE_MS) triggerWave(now)
+                if (autoWaveMs > 0 && now - lastWaveAt > autoWaveMs) triggerWave(now)
 
                 val iter = waves.iterator()
                 while (iter.hasNext()) {
                     val wv = iter.next()
-                    wv.radius += dt * 650f
+                    wv.radius += dt * 650f * waveSpeed
                     if (wv.radius >= 1200f) iter.remove()
                 }
 
@@ -665,21 +578,21 @@ class KaleidoWallpaperService : WallpaperService() {
 
                 if (scale > 0.001f) {
                     // xoay tổng thể như bản gốc
-                    val r = animTime * 0.25f
+                    val r = animTime * 0.25f * rotSpeed
                     val s2 = kotlin.math.sin(r * 2f)
                     val s1 = kotlin.math.sin(r)
                     val rx = Math.toDegrees((s2 * s2 * s2 * 0.4f).toDouble()).toFloat()
                     val ry = Math.toDegrees((s1 * s1 * s1 * 0.6f).toDouble()).toFloat()
                     val rz = Math.toDegrees((s1 * s1 * s1 * -0.3f).toDouble()).toFloat()
                     Matrix.setIdentityM(mv, 0)
-                    Matrix.translateM(mv, 0, 0f, 0f, -camZ)
+                    Matrix.translateM(mv, 0, 0f, 0f, -camZ * camZoom)
                     Matrix.rotateM(mv, 0, rx, 1f, 0f, 0f)
                     Matrix.rotateM(mv, 0, ry, 0f, 1f, 0f)
                     Matrix.rotateM(mv, 0, rz, 0f, 0f, 1f)
                     Matrix.scaleM(mv, 0, scale, scale, scale)
 
-                    val shape = (3.5f + G_SPARK_N) / 2f +
-                        ((3.5f - G_SPARK_N) / 2f) * kotlin.math.sin(morph)
+                    val shape = (3.5f + sparkN) / 2f +
+                        ((3.5f - sparkN) / 2f) * kotlin.math.sin(morph)
 
                     java.util.Arrays.fill(waveArr, 0f)
                     for (i in 0 until waves.size) {
@@ -694,7 +607,7 @@ class KaleidoWallpaperService : WallpaperService() {
                     GLES20.glUniformMatrix4fv(locProj, 1, false, proj, 0)
                     GLES20.glUniform1f(locShape, shape)
                     GLES20.glUniform1f(locState, stateIndex.toFloat())
-                    GLES20.glUniform1f(locPR, pixelRatio * G_SIZE_BOOST)
+                    GLES20.glUniform1f(locPR, pixelRatio * sizeBoost)
                     GLES20.glUniform4fv(locWave, 4, waveArr, 0)
                     GLES20.glUniform3fv(locCore, 4, coreArr, 0)
                     GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
@@ -717,101 +630,6 @@ class KaleidoWallpaperService : WallpaperService() {
                     GLES20.glDisableVertexAttribArray(locP)
                     GLES20.glDisableVertexAttribArray(locSym)
 
-                    // ── Vẽ pet (thuần glyph: body + mắt + miệng + vệ tinh) ──
-                    if (petProg != 0 && petVbo != 0 && petTex != 0) {
-                        GLES20.glUseProgram(petProg)
-                        GLES20.glUniformMatrix4fv(petLocMV, 1, false, mv, 0)
-                        GLES20.glUniformMatrix4fv(petLocProj, 1, false, proj, 0)
-                        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, petTex)
-                        GLES20.glUniform1i(petLocTex, 0)
-                        GLES20.glEnable(GLES20.GL_BLEND)
-                        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-                        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, petVbo)
-                        GLES20.glEnableVertexAttribArray(petLocQuad)
-                        GLES20.glVertexAttribPointer(petLocQuad, 2, GLES20.GL_FLOAT, false, 16, 0)
-                        GLES20.glEnableVertexAttribArray(petLocUV)
-                        GLES20.glVertexAttribPointer(petLocUV, 2, GLES20.GL_FLOAT, false, 16, 8)
-
-                        fun setColor3(r: Float, g: Float, b: Float) {
-                            GLES20.glUniform3f(petLocColor, r, g, b)
-                        }
-                        fun setColorHSV(h: Float, s: Float, v: Float) {
-                            val c = Color.HSVToColor(floatArrayOf(((h % 360f) + 360f) % 360f, s, v))
-                            setColor3(Color.red(c) / 255f, Color.green(c) / 255f, Color.blue(c) / 255f)
-                        }
-                        fun drawGlyph(glyphIdx: Int, px: Float, py: Float, size: Float, rot: Float) {
-                            GLES20.glUniform1f(petLocGlyph, glyphIdx.toFloat())
-                            GLES20.glUniform1f(petLocSize, size)
-                            GLES20.glUniform1f(petLocRot, rot)
-                            GLES20.glUniform2f(petLocPos, px, py)
-                            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-                        }
-
-                        // vị trí pet + wobble bơi
-                        val cx = petX + kotlin.math.sin(petWobble) * 1.2f
-                        val cy = petY + kotlin.math.cos(petWobble * 0.8f) * 0.9f
-
-                        // chọn glyph body theo state — đây là "linh hồn" pet
-                        val bodyGlyph = when {
-                            petSleeping   -> petSleepIdx
-                            petMood > 75f -> petPlayIdx
-                            else          -> petBodyIdx
-                        }
-
-                        // màu thân theo mood (ngủ = xanh lơ lạnh)
-                        val moodT = (petMood / 100f).coerceIn(0f, 1f)
-                        val bodyHue = if (petSleeping) 210f else (140f + moodT * 60f)
-
-                        // body: 1 glyph to, quay chậm, thở nhẹ
-                        val breathe = 1f + kotlin.math.sin(animTime * 2f) * 0.08f
-                        val bodySize = 22f * breathe
-                        val bodyRot = if (petSleeping) 0f else animTime * 0.35f
-                        setColorHSV(bodyHue, 0.80f, 1f)
-                        drawGlyph(bodyGlyph, cx, cy, bodySize, bodyRot)
-
-                        // vệ tinh: 2 glyph nhỏ bay quanh (ellipse cho cảm giác 3D)
-                        val orbitCount = 2
-                        val orbitR = bodySize * 0.95f
-                        val orbitSpeed = if (petSleeping) 0.35f else 1.2f
-                        for (i in 0 until orbitCount) {
-                            val ang = animTime * orbitSpeed + i * (2f * PI.toFloat() / orbitCount)
-                            val ox = cx + kotlin.math.cos(ang) * orbitR
-                            val oy = cy + kotlin.math.sin(ang) * orbitR * 0.5f
-                            val sIdx = petBodyGlyphs[(i + 1) % petBodyGlyphs.size]
-                            val sSize = 6f + kotlin.math.sin(animTime * 3f + i) * 1.2f
-                            setColorHSV(bodyHue + 70f + i * 35f, 0.75f, 1f)
-                            drawGlyph(sIdx, ox, oy, sSize, animTime * 1.5f + i * 1.3f)
-                        }
-
-                        // mặt: mắt (glyph) + miệng (glyph), đặt so le trên body
-                        if (!petSleeping) {
-                            val lookPhase = petWobble * 1.7f
-                            val lookX = kotlin.math.sin(lookPhase) * bodySize * 0.02f
-                            val lookY = kotlin.math.cos(lookPhase * 1.3f) * bodySize * 0.015f
-                            setColor3(1f, 1f, 1f)
-                            for (side in intArrayOf(-1, 1)) {
-                                val eyeX = cx + side * bodySize * 0.20f + lookX
-                                val eyeY = cy - bodySize * 0.03f + lookY
-                                drawGlyph(petEyeIdx, eyeX, eyeY, bodySize * 0.24f, 0f)
-                            }
-                            // miệng nhỏ dưới mắt
-                            setColorHSV(bodyHue + 30f, 0.6f, 1f)
-                            drawGlyph(petMouthIdx, cx, cy + bodySize * 0.22f, bodySize * 0.20f, 0f)
-                        } else {
-                            // ngủ: 2 mắt nhắm thành 2 gạch ngang (dùng glyph ngủ luôn cho tiện pool)
-                            setColor3(0.85f, 0.9f, 1f)
-                            for (side in intArrayOf(-1, 1)) {
-                                drawGlyph(petEyeIdx,
-                                          cx + side * bodySize * 0.20f,
-                                          cy - bodySize * 0.03f,
-                                          bodySize * 0.18f, 0f)
-                            }
-                        }
-
-                        GLES20.glDisableVertexAttribArray(petLocQuad)
-                        GLES20.glDisableVertexAttribArray(petLocUV)
-                    }
                 }
 
                 EGL14.eglSwapBuffers(dpy, surf)
