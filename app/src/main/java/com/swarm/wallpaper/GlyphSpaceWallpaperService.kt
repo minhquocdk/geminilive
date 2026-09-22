@@ -39,8 +39,7 @@ import kotlin.math.sqrt
 import kotlin.random.Random
 
 // ───────────────────────── KASCP3 / AI GLYPH SPACE ─────────────────────────
-// 7 mode: ORBIT / DRIFT / MATRIX / PULSE / HELIX / WAVE / VORTEX.
-// ORBIT và PULSE tự thích ứng tỷ lệ màn hình dọc (portrait).
+// 4 mode ORBIT / DRIFT / MATRIX / PULSE.
 // Tối ưu theo kiến trúc: EGL + GLES2, VBO tĩnh, glyph texture atlas,
 // adaptive FPS, power saver, sensor low-pass, lifecycle dừng render khi ẩn.
 
@@ -99,21 +98,16 @@ vec3 hsl2rgb(float h, float s, float l) {
 vec3 positionForMode(float mode, float t, float id, float seed, float phase, float speed) {
     float minDim = min(uSize.x, uSize.y);
     float aspectX = max(1.0, uSize.x / max(1.0, uSize.y));
-    // portrait = 1 khi màn hình dọc (cao hơn rộng) -> dùng để nắn ellipse theo trục dọc.
-    float portrait = step(uSize.y, uSize.x * 1.05);
 
-    if (mode < 0.5) { // ORBIT
+    if (mode < 0.5) { // ORBIT (mở rộng biên độ để phủ cả trên/dưới)
         float lane12 = mod(id, 12.0);
-        float ring = 0.13 + (lane12 / 11.0) * 0.42;
+        float ring = 0.15 + (lane12 / 11.0) * 0.60;
         float radius = minDim * ring;
         float a = phase + t * speed * 0.34 + lane12 * 3.14159265359 / 6.0;
-        float wobble = sin(t * 0.7 + seed) * minDim * 0.035;
-        // Portrait: bán kính ngang co, bán kính dọc giãn để vòng orbit lấp đầy khung.
-        float rxs = mix(aspectX, 0.88, portrait);
-        float rys = mix(0.58, 1.42, portrait);
+        float wobble = sin(t * 0.7 + seed) * minDim * 0.045;
         return vec3(
-            cos(a) * (radius + wobble) * rxs,
-            sin(a) * (radius + wobble) * rys,
+            cos(a) * (radius + wobble) * aspectX,
+            sin(a) * (radius + wobble) * 1.05,
             130.0 + sin(a * 1.7 + seed) * 310.0
         );
     }
@@ -139,56 +133,58 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
         return vec3(col + pulse, travel, 40.0 + depthCycle);
     }
 
-    if (mode < 3.5) { // PULSE: 12-way symmetry, no geometric core
+    if (mode < 3.5) { // PULSE: 12-way symmetry, no geometric core (phủ cả trên/dưới)
         float branch = mod(id, 12.0);
         float layer = floor(id / 12.0);
-        float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
-        float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
+        float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.040);
+        float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.20;
         float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
-        // Portrait: PULSE kéo dọc để 12 nhánh không bị co cụm giữa màn hình dọc.
-        float rxsP = mix(aspectX, 0.92, portrait);
-        float rysP = mix(1.0, 1.38, portrait);
+        float rr = baseR * pulse;
         return vec3(
-            cos(angle) * baseR * pulse * rxsP,
-            sin(angle) * baseR * pulse * rysP,
+            cos(angle) * rr * aspectX,
+            sin(angle) * rr * 1.15,
             120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
         );
     }
 
-    if (mode < 4.5) { // HELIX: hai dải xoắn ốc (double helix) chạy dọc màn hình
-        float arm = step(0.5, fract(id * 0.5)) * 2.0 - 1.0;
-        float lane = floor(id * 0.5);
-        float t2 = t * (0.35 + speed * 0.35) + lane * 0.37 + seed * 0.1;
-        float y = sin(t2) * uSize.y * 0.42 + sin(seed) * uSize.y * 0.08;
-        float x = cos(t2 + arm * 1.2) * minDim * 0.42 + arm * minDim * 0.06;
-        float z = 90.0 + ((cos(t2 * 1.3) + 1.0) * 0.5) * 520.0;
-        return vec3(x, y, z);
+    if (mode < 4.5) { // SPIRAL GALAXY: 3 nhánh cuộn vào tâm
+        float arm = mod(id, 3.0);
+        float k = floor(id / 3.0);
+        float frac = (k + 1.0) / 60.0;
+        float r = minDim * (0.06 + frac * 0.72);
+        float spin = phase + t * 0.55 + arm * 2.0943951 + frac * 4.2;
+        float breathe = 1.0 + sin(t * 0.9 + k * 0.3 + seed) * 0.08;
+        return vec3(
+            cos(spin) * r * breathe * aspectX,
+            sin(spin) * r * breathe * 1.05,
+            60.0 + (1.0 - frac) * 620.0 + sin(t + k * 0.21) * 70.0
+        );
     }
 
-    if (mode < 5.5) { // WAVE: lưới glyph gợn sóng ngang, wave packet theo cột
-        float cols = 14.0;
-        float col = mod(id, cols) / (cols - 1.0) - 0.5;
-        float row = floor(id / cols);
-        float wave = sin(t * (0.7 + speed * 0.5) + col * 6.2831853072 + seed * 0.3)
-                   + sin(t * 0.5 + row * 0.7) * 0.6;
-        float x = col * uSize.x * 1.02;
-        float y = wave * uSize.y * 0.14 + (row - 2.5) * (uSize.y / 9.0);
-        float z = 120.0 + (sin(t * 0.9 + col * 5.0 + row) + 1.0) * 240.0;
-        return vec3(x, y, z);
+    if (mode < 5.5) { // WARP TUNNEL: vòng glyph phóng về phía camera
+        float ring = mod(id, 10.0);
+        float k = floor(id / 10.0);
+        float ang = phase + k * 0.61;
+        float z = mod(t * 240.0 + seed * 500.0, 900.0);
+        float rr = minDim * (0.09 + ring * 0.052) * (0.35 + z / 900.0);
+        return vec3(
+            cos(ang) * rr * aspectX,
+            sin(ang) * rr,
+            880.0 - z
+        );
     }
 
-    // VORTEX: xoáy loga 24 tia quanh tâm, bán kính tăng dần theo vành.
-    float lane = mod(id, 24.0);
-    float ring = floor(id / 24.0);
-    float a = lane * 0.2617993878 + t * (0.4 + speed * 0.3) + ring * 0.5 + seed * 0.2;
-    float r = minDim * (0.08 + (ring + 1.0) * 0.045) + sin(t * 0.9 + lane) * minDim * 0.03;
-    // Portrait: xoáy cũng giãn nhẹ theo trục dọc cho cân khung.
-    float rxsV = mix(aspectX, 0.95, portrait);
-    float rysV = mix(0.78, 1.32, portrait);
+    // WAVE FIELD: lưới glyph lượn sóng, quét ngang màn hình
+    float cols = 12.0;
+    float rows = max(8.0, floor(uSize.y / max(1.0, minDim * 0.17)));
+    float gx = mod(id, cols) / (cols - 1.0) * 2.0 - 1.0;
+    float gy = mod(floor(id / cols), rows) / (rows - 1.0) * 2.0 - 1.0;
+    float wave = sin(t * 1.25 + gx * 6.2 + gy * 3.4 + seed * 0.5);
+    float wave2 = cos(t * 0.85 + gy * 4.1 + gx * 2.3 + seed * 0.3);
     return vec3(
-        cos(a) * r * rxsV,
-        sin(a) * r * rysV,
-        90.0 + ((sin(a * 2.0 + t * 0.7) + 1.0) * 0.5) * 540.0
+        gx * uSize.x * 0.46,
+        gy * uSize.y * 0.44 + wave * minDim * 0.055,
+        220.0 + wave * 260.0 + wave2 * 160.0 + hash11(id + seed) * 180.0
     );
 }
 
