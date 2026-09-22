@@ -43,7 +43,6 @@ import kotlin.random.Random
 // Tối ưu theo kiến trúc: EGL + GLES2, VBO tĩnh, glyph texture atlas,
 // adaptive FPS, power saver, sensor low-pass, lifecycle dừng render khi ẩn.
 
-// ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
 private const val K_FPS = 30
 private const val K_FPS_ACTIVE = 60
 private const val K_FPS_SAVER = 15
@@ -51,6 +50,7 @@ private const val K_TRANSITION_MS = 850L
 private const val K_FOCAL = 520f
 private const val K_MAX_DPR = 1.75f
 private const val K_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
+private const val K_MATRIX_SYMBOLS = "ﾊﾐﾋｰｳｼﾅ"
 private const val K_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
 private const val K_TILT_SMOOTH_HZ = 4.5f
 private const val K_TILT_X_PER_DEG = 1.35f
@@ -58,15 +58,8 @@ private const val K_TILT_Y_PER_DEG = 1.00f
 private const val K_TILT_LIMIT_DEG = 35f
 private const val K_SENSOR_STILL_EPS_DEG = 0.20f
 
-// Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
-// shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
-private val K_PALETTE_CORE = listOf("#00B95C", "#FFCC00", "#FF4641", "#3186FF")
-private val K_PALETTE_ACCENT = listOf("#00A5B7", "#FF6B2B", "#D8627E", "#A975AA")
-
-// ───────────────────────── SHADER ─────────────────────────
 // aA = id, seed, phase, speed
 // aB = size, life, ageOffset, symbolIndex
-// Toàn bộ công thức hình học + màu + vòng đời chạy trên GPU.
 private const val K_VERT = """
 precision highp float;
 
@@ -84,8 +77,7 @@ uniform vec2 uSize;      // logical CSS-like pixels
 uniform vec2 uCamera;    // logical pixels
 uniform float uDpr;
 uniform float uFocal;
-uniform vec3 uCore[4];    // màu lõi 4 lớp (kỹ thuật Gemini)
-uniform vec3 uAccent[4];  // màu viền 4 lớp
+uniform vec4 uClock;
 
 varying vec4 vColor;
 varying float vSym;
@@ -103,6 +95,55 @@ vec3 hsl2rgb(float h, float s, float l) {
     rgb = rgb * rgb * (3.0 - 2.0 * rgb);
     float c = (1.0 - abs(2.0 * l - 1.0)) * s;
     return (rgb - 0.5) * c + l;
+}
+
+vec3 positionForMode(float mode, float t, float id, float seed, float phase, float speed);
+
+float segBits(float d) {
+    if (d < 0.5) return 63.0;
+    if (d < 1.5) return 6.0;
+    if (d < 2.5) return 91.0;
+    if (d < 3.5) return 79.0;
+    if (d < 4.5) return 102.0;
+    if (d < 5.5) return 109.0;
+    if (d < 6.5) return 125.0;
+    if (d < 7.5) return 7.0;
+    if (d < 8.5) return 127.0;
+    return 111.0;
+}
+
+vec3 clockPosition(float t, float id, float seed, float phase, float speed) {
+    float minDim = min(uSize.x, uSize.y);
+    float segIdx = mod(id, 28.0);
+    float digit = floor(segIdx / 7.0);
+    float seg = mod(segIdx, 7.0);
+    float digitVal = uClock.x;
+    if (digit > 0.5) digitVal = uClock.y;
+    if (digit > 1.5) digitVal = uClock.z;
+    if (digit > 2.5) digitVal = uClock.w;
+    float bits = segBits(digitVal);
+    float bitMask = exp2(seg);
+    float on = mod(floor(bits / bitMask + 0.0001), 2.0);
+    float digitW = minDim * 0.13;
+    float digitH = minDim * 0.26;
+    float spacing = digitW * 1.35;
+    float baseX = -spacing * 1.5 + spacing * digit;
+    float frac = clamp(hash11(id * 0.37 + seed * 0.11), 0.05, 0.95);
+    vec2 segA;
+    vec2 segB;
+    if (seg < 0.5) { segA = vec2(-1.0, -1.0); segB = vec2(1.0, -1.0); }
+    else if (seg < 1.5) { segA = vec2(1.0, -1.0); segB = vec2(1.0, 0.0); }
+    else if (seg < 2.5) { segA = vec2(1.0, 0.0); segB = vec2(1.0, 1.0); }
+    else if (seg < 3.5) { segA = vec2(-1.0, 1.0); segB = vec2(1.0, 1.0); }
+    else if (seg < 4.5) { segA = vec2(-1.0, 0.0); segB = vec2(-1.0, 1.0); }
+    else if (seg < 5.5) { segA = vec2(-1.0, -1.0); segB = vec2(-1.0, 0.0); }
+    else { segA = vec2(-1.0, 0.0); segB = vec2(1.0, 0.0); }
+    vec2 local = mix(segA, segB, frac) * vec2(digitW * 0.5, digitH * 0.5);
+    vec2 pos = vec2(baseX, 0.0) + local;
+    pos.y += (1.0 - on) * 4000.0;
+    pos.x += sin(t * 0.7 + seed) * 1.5;
+    pos.y += cos(t * 0.6 + seed * 1.3) * 1.5 * on;
+    return vec3(pos.x, pos.y, 110.0 + sin(t * 1.1 + seed) * 60.0);
 }
 
 vec3 positionForMode(float mode, float t, float id, float seed, float phase, float speed) {
@@ -143,17 +184,45 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
         return vec3(col + pulse, travel, 40.0 + depthCycle);
     }
 
-    // PULSE: 12-way symmetry, no geometric core
-    float branch = mod(id, 12.0);
-    float layer = floor(id / 12.0);
-    float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
-    float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
-    float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
-    return vec3(
-        cos(angle) * baseR * pulse * aspectX,
-        sin(angle) * baseR * pulse,
-        120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
-    );
+    if (mode < 3.5) { // PULSE: 12-way symmetry, no geometric core
+        float branch = mod(id, 12.0);
+        float layer = floor(id / 12.0);
+        float baseR = minDim * (0.10 + mod(layer, 10.0) * 0.035);
+        float pulse = 1.0 + sin(t * 1.35 + layer * 0.45 + seed) * 0.16;
+        float angle = branch * 3.14159265359 / 6.0 + sin(t * 0.35 + layer * 0.2) * 0.22;
+        return vec3(
+            cos(angle) * baseR * pulse * aspectX,
+            sin(angle) * baseR * pulse,
+            120.0 + sin(t * 1.15 + branch * 0.5 + layer) * 260.0
+        );
+    }
+    if (mode < 4.5) { // ORBIT + DRIFT
+        vec3 a = positionForMode(0.0, t, id, seed, phase, speed);
+        vec3 b = positionForMode(1.0, t, id, seed, phase, speed);
+        return mix(a, b, hash11(id * 0.13 + seed * 0.07));
+    }
+    if (mode < 5.5) { // ORBIT + MATRIX
+        vec3 a = positionForMode(0.0, t, id, seed, phase, speed);
+        vec3 b = positionForMode(2.0, t, id, seed, phase, speed);
+        return mix(a, b, hash11(id * 0.19 + seed * 0.05));
+    }
+    if (mode < 6.5) { // PULSE + DRIFT
+        vec3 a = positionForMode(3.0, t, id, seed, phase, speed);
+        vec3 b = positionForMode(1.0, t, id, seed, phase, speed);
+        return mix(a, b, hash11(id * 0.11 + seed * 0.03));
+    }
+    if (mode < 7.5) { // PULSE + MATRIX
+        vec3 a = positionForMode(3.0, t, id, seed, phase, speed);
+        vec3 b = positionForMode(2.0, t, id, seed, phase, speed);
+        return mix(a, b, hash11(id * 0.23 + seed * 0.09));
+    }
+    if (mode < 8.5) { // DRIFT + MATRIX
+        vec3 a = positionForMode(1.0, t, id, seed, phase, speed);
+        vec3 b = positionForMode(2.0, t, id, seed, phase, speed);
+        return mix(a, b, hash11(id * 0.17 + seed * 0.13));
+    }
+    // CLOCK: glyphs form current time digits
+    return clockPosition(t, id, seed, phase, speed);
 }
 
 void main() {
@@ -206,28 +275,27 @@ void main() {
     float alpha = edgeFade * lifeFadeIn * lifeFadeOut * sat(0.25 + scale * 0.95);
     if (glitching > 0.5) alpha *= mix(0.35, 1.0, hash11(frameKey + seed * 11.0));
 
-    // Palette 4 lớp (kỹ thuật Gemini): chọn lớp theo thời gian, nội suy
-    // core -> accent theo chiều sâu để giữ sắc độ ổn định thay vì HSL quay vòng.
-    float layerF = mod(uTime * 0.08 + seed * 0.37, 4.0);
-    int li = int(layerF);
-    int ni = int(mod(layerF + 1.0, 4.0));
-    float lt = fract(layerF);
-    vec3 pc = mix(uCore[li], uCore[ni], lt);
-    vec3 pa = mix(uAccent[li], uAccent[ni], lt);
-    float coreMix = clamp((1.0 - scale) * 1.25, 0.0, 1.0);
-    vec3 rgb = mix(pc, pa, coreMix);
-    if (glitching > 0.5) rgb = min(vec3(1.0), rgb * 1.25);
+    float hueDeg = mod(uTime * 16.0 + (1.0 - scale) * 42.0 + mod(id, 9.0) * 2.4, 360.0);
+    vec3 rgb = hsl2rgb(hueDeg / 360.0, 0.98, glitching > 0.5 ? 0.92 : 0.84);
     vColor = vec4(rgb, alpha);
 
+    float modeSym = baseSym;
+    if (uMode > 1.5 && uMode < 2.5) modeSym = 9.0 + floor(mod(id, 7.0));
+    if (uMode > 3.5 && uMode < 8.5) {
+        modeSym = (mod(id, 2.0) < 1.0) ? baseSym : (9.0 + floor(mod(id, 7.0)));
+    }
     float glitchSym = floor(hash11(frameKey * 13.0 + seed * 31.0 + id) * 9.0);
     float swapGate = step(hash11(frameKey + seed * 7.0), 0.72);
-    vSym = mix(baseSym, glitchSym, glitching * swapGate);
+    vSym = mix(modeSym, glitchSym, glitching * swapGate);
 
     // logical pixels -> clip space. Android viewport tự scale lên physical pixels.
     float cx = sx / uSize.x * 2.0 - 1.0;
     float cy = 1.0 - sy / uSize.y * 2.0;
     gl_Position = vec4(cx, cy, 0.0, 1.0);
-    gl_PointSize = max(8.0, baseSize * scale) * uDpr;
+    float modeSize = 1.0;
+    if (uMode > 1.5 && uMode < 2.5) modeSize = 1.35;
+    if (uMode > 3.5) modeSize = 1.35;
+    gl_PointSize = max(8.0, baseSize * modeSize * scale) * uDpr;
 }
 """
 
@@ -247,7 +315,6 @@ void main() {
 }
 """
 
-// ───────────────────────── WALLPAPER SERVICE ─────────────────────────
 class GlyphSpaceWallpaperService : WallpaperService() {
     override fun onCreateEngine(): Engine = KEngine()
 
@@ -284,17 +351,12 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locCamera = -1
         private var locDpr = -1
         private var locFocal = -1
-        private var locCore = -1
-        private var locAccent = -1
         private var locTex = -1
+        private var locClock = -1
 
         private var w = 0
         private var h = 0
         private var glyphCount = 0
-
-        // Palette 4 lớp (kỹ thuật Gemini): nạp hex -> float[3] trong init.
-        private val coreArr = FloatArray(12)
-        private val accentArr = FloatArray(12)
 
         private var lastFrameAt = 0L
         private var timeSec = 0f
@@ -328,20 +390,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var downX = 0f
         private var downY = 0f
         private var dragging = false
-
-        init {
-            fillColors(coreArr, K_PALETTE_CORE)
-            fillColors(accentArr, K_PALETTE_ACCENT)
-        }
-
-        private fun fillColors(dst: FloatArray, hex: List<String>) {
-            hex.forEachIndexed { i, s ->
-                val c = Color.parseColor(s)
-                dst[i * 3] = Color.red(c) / 255f
-                dst[i * 3 + 1] = Color.green(c) / 255f
-                dst[i * 3 + 2] = Color.blue(c) / 255f
-            }
-        }
 
         private val loop = object : Runnable {
             override fun run() {
@@ -532,7 +580,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             haveBaseline = false
         }
 
-        // ── EGL / GL ──
         private fun initEGL(holder: SurfaceHolder): Boolean {
             dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
             if (dpy == EGL14.EGL_NO_DISPLAY) return false
@@ -604,9 +651,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locCamera = GLES20.glGetUniformLocation(prog, "uCamera")
             locDpr = GLES20.glGetUniformLocation(prog, "uDpr")
             locFocal = GLES20.glGetUniformLocation(prog, "uFocal")
-            locCore = GLES20.glGetUniformLocation(prog, "uCore")
-            locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
+            locClock = GLES20.glGetUniformLocation(prog, "uClock")
 
             buildAtlas()
             val ids = IntArray(1)
@@ -624,7 +670,9 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 color = Color.WHITE
                 textAlign = Paint.Align.CENTER
             }
-            var syms = K_SYMBOLS.map { it.toString() }.filter { p.hasGlyph(it) }
+            val orbitSyms = K_SYMBOLS.map { it.toString() }.filter { p.hasGlyph(it) }
+            val matrixSyms = K_MATRIX_SYMBOLS.map { it.toString() }.filter { p.hasGlyph(it) }
+            var syms = orbitSyms + matrixSyms
             if (syms.isEmpty()) syms = K_SYMBOLS_FALLBACK.map { it.toString() }.filter { p.hasGlyph(it) }
             if (syms.isEmpty()) syms = listOf("+")
             syms = syms.take(16)
@@ -691,7 +739,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, glyphCount * 8 * 4, buf, GLES20.GL_STATIC_DRAW)
         }
 
-        // ── khung hình ──
         private fun drawFrame(now: Long) {
             if (!glReady || w <= 0 || h <= 0 || glyphCount <= 0) return
             try {
@@ -703,7 +750,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 if (transitioning) {
                     transitionT = ((now - transitionStartAt).toFloat() / K_TRANSITION_MS).coerceIn(0f, 1f)
                     if (transitionT >= 1f) {
-                        modeIndex = (modeIndex + 1) % 4
+                        modeIndex = (modeIndex + 1) % 10
                         transitioning = false
                         transitionT = 0f
                     }
@@ -721,17 +768,23 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUseProgram(prog)
                 GLES20.glUniform1f(locTime, timeSec)
                 GLES20.glUniform1f(locMode, modeIndex.toFloat())
-                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 4).toFloat())
+                GLES20.glUniform1f(locNextMode, ((modeIndex + 1) % 10).toFloat())
                 GLES20.glUniform1f(locTransitionT, transitionT)
                 GLES20.glUniform1f(locTransitioning, if (transitioning) 1f else 0f)
                 GLES20.glUniform1f(locTransitionSerial, transitionSerial)
                 GLES20.glUniform1f(locTransitionStartTime, transitionStartTimeSec)
+                val cal = java.util.Calendar.getInstance()
+                val hh = cal.get(java.util.Calendar.HOUR_OF_DAY)
+                val mm = cal.get(java.util.Calendar.MINUTE)
+                GLES20.glUniform4f(
+                    locClock,
+                    (hh / 10).toFloat(), (hh % 10).toFloat(),
+                    (mm / 10).toFloat(), (mm % 10).toFloat()
+                )
                 GLES20.glUniform2f(locSize, w / dpr, h / dpr)
                 GLES20.glUniform2f(locCamera, cameraX, cameraY)
                 GLES20.glUniform1f(locDpr, dpr)
                 GLES20.glUniform1f(locFocal, K_FOCAL)
-                GLES20.glUniform3fv(locCore, 4, coreArr, 0)
-                GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
 
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
