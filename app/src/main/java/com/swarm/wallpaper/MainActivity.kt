@@ -30,12 +30,18 @@ class MainActivity : Activity() {
         }
         val b1 = Button(this).apply { text = "Claude Swarm (terminal)" }
         val b2 = Button(this).apply { text = "Gemini Particles (3D)" }
+        val b3 = Button(this).apply { text = "AI Glyph Space (tap to switch)" }
+        val b4 = Button(this).apply { text = "Kaleidoscope Glyphs (tap to switch)" }
         b1.setOnClickListener { pick(SwarmWallpaperService::class.java) }
         b2.setOnClickListener { pick(GeminiWallpaperService::class.java) }
+        b3.setOnClickListener { pick(GlyphSpaceWallpaperService::class.java) }
+        b4.setOnClickListener { pick(KaleidoWallpaperService::class.java) }
 
         root.addView(title)
         root.addView(b1)
         root.addView(b2)
+        root.addView(b3)
+        root.addView(b4)
         setContentView(root)
     }
 

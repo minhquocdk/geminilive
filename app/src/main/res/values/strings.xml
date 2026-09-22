@@ -4,4 +4,8 @@
     <string name="desc">Autonomous swarm terminal live wallpaper</string>
     <string name="app_name_gemini">Gemini Particles</string>
     <string name="desc_gemini">3D symbol particle fusion live wallpaper</string>
+    <string name="app_name_glyph">AI Glyph Space</string>
+    <string name="desc_glyph">Depth glyph field with 4 motion modes, tap to switch</string>
+    <string name="app_name_kaleido">Kaleidoscope Glyphs</string>
+    <string name="desc_kaleido">Symmetric glyph kaleidoscope, tap to change motion style</string>
 </resources>
