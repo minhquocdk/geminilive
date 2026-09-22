@@ -30,7 +30,7 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val FPS_NORMAL = 24        // fps bình thường
+private const val FPS_NORMAL = 60        // fps bình thường
 private const val FPS_SAVER = 12         // fps khi bật Tiết kiệm pin của máy
 private const val TYPE_CPS = 48f         // tốc độ gõ chữ (ký tự/giây)
 

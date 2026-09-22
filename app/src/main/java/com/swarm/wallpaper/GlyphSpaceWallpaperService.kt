@@ -22,7 +22,7 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val GS_FPS = 30
+private const val GS_FPS = 60
 private const val GS_FPS_SAVER = 15
 private const val GS_TRANSITION_MS = 850f
 private const val GS_FOCAL = 520f

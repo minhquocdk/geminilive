@@ -22,7 +22,7 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val K_FPS = 30
+private const val K_FPS = 60
 private const val K_FPS_SAVER = 15
 private const val K_SLOTS = 7              // số ký tự lặp lại trong mỗi cánh
 private const val K_CHARS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
