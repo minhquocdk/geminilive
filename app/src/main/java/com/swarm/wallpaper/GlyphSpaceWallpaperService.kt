@@ -158,7 +158,7 @@ void main() {
 }
 """
 
-class GeminiWallpaperService : WallpaperService() {
+class GlyphSpaceWallpaperService : WallpaperService() {
 
     override fun onCreateEngine(): Engine = AquariumEngine()
 
