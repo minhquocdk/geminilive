@@ -21,7 +21,6 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.service.wallpaper.WallpaperService
-import android.util.Log
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import java.nio.ByteBuffer
@@ -32,9 +31,7 @@ import kotlin.math.max
 import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val G_PARTICLES_MAX = 20000 // số hạt tối đa
-private const val G_PARTICLES_MIN = 4000  // số hạt tối thiểu
-private const val G_PARTICLES_PER_PX = 1f / 130_000f // mật độ hạt theo pixel
+private const val G_PARTICLES = 20000     // số hạt
 private const val G_FPS = 60              // fps bình thường
 private const val G_FPS_SAVER = 15        // fps khi bật Tiết kiệm pin
 private const val G_AUTO_WAVE_MS = 8000L  // tự bắn sóng đổi màu mỗi N ms (0 = tắt, chỉ chạm mới đổi)
@@ -42,8 +39,6 @@ private const val G_SPARK_N = 0.7f        // độ "nhọn" của hình sparkle
 private const val G_SIZE_BOOST = 1.6f     // nhân kích thước ký tự cho dễ nhìn trên màn hình nhỏ
 private const val G_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
-private const val G_SHAPE_CENTER = 3.5f
-private const val TAG = "GeminiWallpaper"
 
 private class GWave(var radius: Float, val state: Int)
 
@@ -57,7 +52,6 @@ uniform mat4 uProj;
 uniform float uShape;
 uniform float uState;
 uniform float uPR;
-uniform float uMaxPoint;
 uniform vec4 uWave[4];    // radius, state, width, active
 uniform vec3 uCore[4];
 uniform vec3 uAccent[4];
@@ -99,7 +93,7 @@ void main() {
     float size = aP.w * (0.8 + fade * 1.8) * (boost > 1.0 ? 1.4 : 1.0);
 
     vec4 mv = uMV * vec4(x, y, z, 1.0);
-    gl_PointSize = min(size * uPR * (300.0 / -mv.z), uMaxPoint);
+    gl_PointSize = size * uPR * (300.0 / -mv.z);
     gl_Position = uProj * mv;
     vSym = aSym;
 }
@@ -132,13 +126,6 @@ class GeminiWallpaperService : WallpaperService() {
 
         private var shown = false
         private var glReady = false
-        private var eglInited = false
-        private var thermalHot = false
-        private var maxPointSize = 64f
-        private var particleCount = G_PARTICLES_MAX
-        private var offsetX = 0.5f
-        private var offsetY = 0.5f
-        private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
 
         private var dpy: EGLDisplay = EGL14.EGL_NO_DISPLAY
         private var ctx: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -154,7 +141,6 @@ class GeminiWallpaperService : WallpaperService() {
         private var locShape = 0
         private var locState = 0
         private var locPR = 0
-        private var locMaxPoint = 0
         private var locWave = 0
         private var locCore = 0
         private var locAccent = 0
@@ -182,7 +168,7 @@ class GeminiWallpaperService : WallpaperService() {
                 val t0 = SystemClock.uptimeMillis()
                 drawFrame(t0)
                 if (shown) {
-                    val fps = if (pm.isPowerSaveMode || thermalHot) G_FPS_SAVER else G_FPS
+                    val fps = if (pm.isPowerSaveMode) G_FPS_SAVER else G_FPS
                     handler.postDelayed(this, max(1L, 1000L / fps - (SystemClock.uptimeMillis() - t0)))
                 }
             }
@@ -205,13 +191,6 @@ class GeminiWallpaperService : WallpaperService() {
         override fun onCreate(surfaceHolder: SurfaceHolder) {
             super.onCreate(surfaceHolder)
             setTouchEventsEnabled(true)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                val l = PowerManager.OnThermalStatusChangedListener { status ->
-                    thermalHot = status >= PowerManager.THERMAL_STATUS_MODERATE
-                }
-                thermalListener = l
-                pm.addThermalStatusListener(l)
-            }
         }
 
         override fun onSurfaceCreated(holder: SurfaceHolder) {
@@ -227,9 +206,6 @@ class GeminiWallpaperService : WallpaperService() {
             // vừa khít chiều ngang màn hình dọc
             camZ = max(240f, 170f / (0.767f * aspect))
             Matrix.perspectiveM(proj, 0, 75f, aspect, 0.1f, 2000f)
-            // số hạt thích ứng theo diện tích màn hình (fill-rate)
-            val px = w.toLong() * h.toLong()
-            particleCount = (px * G_PARTICLES_PER_PX).toInt().coerceIn(G_PARTICLES_MIN, G_PARTICLES_MAX)
         }
 
         override fun onVisibilityChanged(visible: Boolean) {
@@ -252,9 +228,6 @@ class GeminiWallpaperService : WallpaperService() {
         }
 
         override fun onDestroy() {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                thermalListener?.let { pm.removeThermalStatusListener(it) }
-            }
             shown = false
             handler.removeCallbacks(loop)
             releaseGL()
@@ -274,14 +247,6 @@ class GeminiWallpaperService : WallpaperService() {
             return super.onCommand(action, x, y, z, extras, resultRequested)
         }
 
-        override fun onOffsetsChanged(
-            xOffset: Float, yOffset: Float, xOffsetStep: Float, yOffsetStep: Float,
-            xPixelOffset: Int, yPixelOffset: Int
-        ) {
-            offsetX = xOffset
-            offsetY = yOffset
-        }
-
         private fun triggerWave(now: Long) {
             if (now - lastWaveAt < 300) return
             lastWaveAt = now
@@ -296,7 +261,6 @@ class GeminiWallpaperService : WallpaperService() {
             if (dpy == EGL14.EGL_NO_DISPLAY) return false
             val ver = IntArray(2)
             if (!EGL14.eglInitialize(dpy, ver, 0, ver, 1)) return false
-            eglInited = true
             val attr = intArrayOf(
                 EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
                 EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
@@ -313,12 +277,7 @@ class GeminiWallpaperService : WallpaperService() {
             )
             surf = EGL14.eglCreateWindowSurface(dpy, cfg, holder.surface, intArrayOf(EGL14.EGL_NONE), 0)
             if (ctx == EGL14.EGL_NO_CONTEXT || surf == EGL14.EGL_NO_SURFACE) return false
-            if (!EGL14.eglMakeCurrent(dpy, surf, surf, ctx)) return false
-            EGL14.eglSwapInterval(dpy, 1)
-            val range = IntArray(2)
-            GLES20.glGetIntegerv(GLES20.GL_ALIASED_POINT_SIZE_RANGE, range, 0)
-            maxPointSize = range[1].coerceAtLeast(1).toFloat()
-            return true
+            return EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
         }
 
         private fun compile(type: Int, src: String): Int {
@@ -353,7 +312,6 @@ class GeminiWallpaperService : WallpaperService() {
             locShape = GLES20.glGetUniformLocation(prog, "uShape")
             locState = GLES20.glGetUniformLocation(prog, "uState")
             locPR = GLES20.glGetUniformLocation(prog, "uPR")
-            locMaxPoint = GLES20.glGetUniformLocation(prog, "uMaxPoint")
             locWave = GLES20.glGetUniformLocation(prog, "uWave")
             locCore = GLES20.glGetUniformLocation(prog, "uCore")
             locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
@@ -362,8 +320,8 @@ class GeminiWallpaperService : WallpaperService() {
             val symCount = buildAtlas()
 
             // dữ liệu hạt: angle, rad, zOffset, speed, symbol (5 float / hạt)
-            val buf = ByteBuffer.allocateDirect(G_PARTICLES_MAX * 5 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-            for (i in 0 until G_PARTICLES_MAX) {
+            val buf = ByteBuffer.allocateDirect(G_PARTICLES * 5 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+            for (i in 0 until G_PARTICLES) {
                 val r1 = Random.nextFloat()
                 val r5 = r1 * r1 * r1 * r1 * r1
                 buf.put((Random.nextFloat() * 2f * PI).toFloat())
@@ -372,12 +330,12 @@ class GeminiWallpaperService : WallpaperService() {
                 buf.put(0.8f + Random.nextFloat() * 1.2f)
                 buf.put(Random.nextInt(symCount).toFloat())
             }
-            buf.rewind()
+            buf.position(0)
             val ids = IntArray(1)
             GLES20.glGenBuffers(1, ids, 0)
             vbo = ids[0]
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_PARTICLES_MAX * 5 * 4, buf, GLES20.GL_STATIC_DRAW)
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_PARTICLES * 5 * 4, buf, GLES20.GL_STATIC_DRAW)
             return true
         }
 
@@ -405,7 +363,8 @@ class GeminiWallpaperService : WallpaperService() {
             tex = ids[0]
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
@@ -415,7 +374,7 @@ class GeminiWallpaperService : WallpaperService() {
 
         private fun releaseGL() {
             try {
-                if (eglInited) {
+                if (dpy != EGL14.EGL_NO_DISPLAY) {
                     if (glReady && ctx != EGL14.EGL_NO_CONTEXT && surf != EGL14.EGL_NO_SURFACE) {
                         EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
                         GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
@@ -427,13 +386,11 @@ class GeminiWallpaperService : WallpaperService() {
                     if (ctx != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(dpy, ctx)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "releaseGL failed", e)
+                // bỏ qua
             }
             surf = EGL14.EGL_NO_SURFACE
             ctx = EGL14.EGL_NO_CONTEXT
-            dpy = EGL14.EGL_NO_DISPLAY
             glReady = false
-            eglInited = false
         }
 
         // ── khung hình ──
@@ -472,15 +429,14 @@ class GeminiWallpaperService : WallpaperService() {
                     val ry = Math.toDegrees((s1 * s1 * s1 * 0.6f).toDouble()).toFloat()
                     val rz = Math.toDegrees((s1 * s1 * s1 * -0.3f).toDouble()).toFloat()
                     Matrix.setIdentityM(mv, 0)
-                    Matrix.translateM(mv, 0, (0.5f - offsetX) * 80f, -(0.5f - offsetY) * 80f, 0f)
                     Matrix.translateM(mv, 0, 0f, 0f, -camZ)
                     Matrix.rotateM(mv, 0, rx, 1f, 0f, 0f)
                     Matrix.rotateM(mv, 0, ry, 0f, 1f, 0f)
                     Matrix.rotateM(mv, 0, rz, 0f, 0f, 1f)
                     Matrix.scaleM(mv, 0, scale, scale, scale)
 
-                    val shape = (G_SHAPE_CENTER + G_SPARK_N) / 2f +
-                        (G_SHAPE_CENTER - G_SPARK_N) / 2f * kotlin.math.sin(morph)
+                    val shape = (3.5f + G_SPARK_N) / 2f +
+                        ((3.5f - G_SPARK_N) / 2f) * kotlin.math.sin(morph)
 
                     java.util.Arrays.fill(waveArr, 0f)
                     for (i in 0 until waves.size) {
@@ -496,7 +452,6 @@ class GeminiWallpaperService : WallpaperService() {
                     GLES20.glUniform1f(locShape, shape)
                     GLES20.glUniform1f(locState, stateIndex.toFloat())
                     GLES20.glUniform1f(locPR, pixelRatio * G_SIZE_BOOST)
-                    GLES20.glUniform1f(locMaxPoint, maxPointSize)
                     GLES20.glUniform4fv(locWave, 4, waveArr, 0)
                     GLES20.glUniform3fv(locCore, 4, coreArr, 0)
                     GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
@@ -507,8 +462,7 @@ class GeminiWallpaperService : WallpaperService() {
 
                     GLES20.glEnable(GLES20.GL_BLEND)
                     GLES20.glBlendFuncSeparate(
-                        GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA,
-                        GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA
+                        GLES20.GL_SRC_ALPHA, GLES20.GL_ONE, GLES20.GL_ZERO, GLES20.GL_ONE
                     )
 
                     GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
@@ -516,15 +470,14 @@ class GeminiWallpaperService : WallpaperService() {
                     GLES20.glVertexAttribPointer(locP, 4, GLES20.GL_FLOAT, false, 20, 0)
                     GLES20.glEnableVertexAttribArray(locSym)
                     GLES20.glVertexAttribPointer(locSym, 1, GLES20.GL_FLOAT, false, 20, 16)
-                    val drawCount = if (thermalHot) particleCount / 2 else particleCount
-                    GLES20.glDrawArrays(GLES20.GL_POINTS, 0, drawCount)
+                    GLES20.glDrawArrays(GLES20.GL_POINTS, 0, G_PARTICLES)
                     GLES20.glDisableVertexAttribArray(locP)
                     GLES20.glDisableVertexAttribArray(locSym)
                 }
 
                 EGL14.eglSwapBuffers(dpy, surf)
             } catch (e: Exception) {
-                Log.w(TAG, "drawFrame failed", e)
+                // bỏ qua khung lỗi
             }
         }
     }
