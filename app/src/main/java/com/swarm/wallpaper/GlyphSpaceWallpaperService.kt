@@ -52,8 +52,6 @@ private const val K_FOCAL = 520f
 private const val K_MAX_DPR = 1.4f
 private const val K_SYMBOLS = "ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛋᛏᛒᛖᛗᛚᛝᛟᛞ"
 private const val K_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
-private const val K_SYMBOLS_MATRIX = "ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛋᛏᛒᛖᛗᛚᛝᛟᛞ"
-private const val K_SYMBOLS_MATRIX_FALLBACK = "01アイウエオカキクケコサシスセソ"
 private const val K_TILT_SMOOTH_HZ = 4.5f
 private const val K_TILT_X_PER_DEG = 1.35f
 private const val K_TILT_Y_PER_DEG = 1.00f
@@ -95,7 +93,6 @@ uniform float uSecond;
 
 varying vec4 vColor;
 varying float vSym;
-varying float vTexSel;
 
 float hash11(float p) {
     return fract(sin(p * 127.1 + 311.7) * 43758.5453123);
@@ -284,7 +281,6 @@ void main() {
     vSym = mix(baseSym, glitchSym, glitching * swapGate);
 
     float modeSel = mix(uMode, uNextMode, uTransitioning * step(0.5, uTransitionT));
-    vTexSel = step(6.5, modeSel);
     float sizeMul = 1.0;
     if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 2.0;      // DRIFT / MATRIX: baseSize x2
     else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 2.0; // DRIFT+MATRIX lai
@@ -302,14 +298,12 @@ private const val K_FRAG = """
 precision mediump float;
 varying vec4 vColor;
 varying float vSym;
-varying float vTexSel;
 uniform sampler2D uTex;
-uniform sampler2D uTex2;
 
 void main() {
     vec2 uv = gl_PointCoord;
     uv.x = (uv.x + vSym) / 16.0;
-    vec4 t = vTexSel > 0.5 ? texture2D(uTex2, uv) : texture2D(uTex, uv);
+    vec4 t = texture2D(uTex, uv);
     float a = t.a * vColor.a;
     if (a < 0.01) discard;
     vec3 brightRgb = min(vec3(1.0), vColor.rgb * 1.1);
@@ -340,7 +334,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var prog = 0
         private var vbo = 0
         private var tex = 0
-        private var tex2 = 0
 
         private var locA = -1
         private var locB = -1
@@ -358,7 +351,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locCore = -1
         private var locAccent = -1
         private var locTex = -1
-        private var locTex2 = -1
         private var locHour = -1
         private var locMinute = -1
         private var locSecond = -1
@@ -682,13 +674,11 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locCore = GLES20.glGetUniformLocation(prog, "uCore")
             locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
-            locTex2 = GLES20.glGetUniformLocation(prog, "uTex2")
             locHour = GLES20.glGetUniformLocation(prog, "uHour")
             locMinute = GLES20.glGetUniformLocation(prog, "uMinute")
             locSecond = GLES20.glGetUniformLocation(prog, "uSecond")
 
             buildAtlas()
-            buildAtlas2()
             val ids = IntArray(1)
             GLES20.glGenBuffers(1, ids, 0)
             vbo = ids[0]
@@ -722,40 +712,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glGenTextures(1, ids, 0)
             tex = ids[0]
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
-            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
-            GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            bmp.recycle()
-        }
-
-        // Atlas riêng cho MODE MATRIX REAL: bộ ký tự kiểu Matrix (katakana/số).
-        private fun buildAtlas2() {
-            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-                textSize = 46f
-                color = Color.WHITE
-                textAlign = Paint.Align.CENTER
-            }
-            var syms = K_SYMBOLS_MATRIX.map { it.toString() }.filter { p.hasGlyph(it) }
-            if (syms.isEmpty()) syms = K_SYMBOLS_MATRIX_FALLBACK.map { it.toString() }.filter { p.hasGlyph(it) }
-            if (syms.isEmpty()) syms = listOf("1")
-            syms = syms.take(16)
-
-            val bmp = Bitmap.createBitmap(1024, 64, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            val fm = p.fontMetrics
-            val baseline = 32f - (fm.ascent + fm.descent) / 2f
-            for (i in 0 until 16) {
-                canvas.drawText(syms[i % syms.size], i * 64f + 32f, baseline, p)
-            }
-
-            val ids = IntArray(1)
-            GLES20.glGenTextures(1, ids, 0)
-            tex2 = ids[0]
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex2)
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
             GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
@@ -858,9 +814,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
                 GLES20.glUniform1i(locTex, 0)
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex2)
-                GLES20.glUniform1i(locTex2, 1)
 
                 GLES20.glEnable(GLES20.GL_BLEND)
                 GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
@@ -887,7 +840,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                         EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
                         if (vbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
                         if (tex != 0) GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
-                        if (tex2 != 0) GLES20.glDeleteTextures(1, intArrayOf(tex2), 0)
                         if (prog != 0) GLES20.glDeleteProgram(prog)
                     }
                     EGL14.eglMakeCurrent(
@@ -905,7 +857,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             prog = 0
             vbo = 0
             tex = 0
-            tex2 = 0
             glReady = false
         }
     }
