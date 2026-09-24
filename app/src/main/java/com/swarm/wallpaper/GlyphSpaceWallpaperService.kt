@@ -81,12 +81,12 @@ uniform float uTransitionT;
 uniform float uTransitioning;
 uniform float uTransitionSerial;
 uniform float uTransitionStartTime;
-uniform vec2 uSize;
-uniform vec2 uCamera;
+uniform vec2 uSize;      // logical CSS-like pixels
+uniform vec2 uCamera;    // logical pixels
 uniform float uDpr;
 uniform float uFocal;
-uniform vec3 uCore[4];
-uniform vec3 uAccent[4];
+uniform vec3 uCore[4];    // màu lõi 4 lớp (kỹ thuật Gemini)
+uniform vec3 uAccent[4];  // màu viền 4 lớp
 uniform float uHour;
 uniform float uMinute;
 uniform float uSecond;
@@ -156,6 +156,8 @@ vec3 posPulse(float t, float id, float seed, float minDim, float aspectX) {
     );
 }
 
+// Mặt đồng hồ hiện đại: vành 12 mốc giờ + kim giờ/phút/giây bằng glyph theo giờ thật,
+// phần glyph còn lại orbit nhẹ quanh mặt số với z lệch tạo cảm giác 3D.
 vec3 posClock(float t, float id, float seed, float phase, float speed, float minDim, float aspectX) {
     float faceR = minDim * 0.40;
     float role = mod(id, 72.0);
@@ -218,12 +220,12 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
     if (mode < 1.5) return posDrift(t, id, seed, phase, speed);
     if (mode < 2.5) return posMatrix(t, id, seed, speed, 13.0, 1.0);
     if (mode < 3.5) return posPulse(t, id, seed, minDim, aspectX);
-    if (mode < 4.5) {
+    if (mode < 4.5) { // ORBIT + PULSE lai
         float bl = 0.5 + 0.5 * sin(t * 0.18 + seed * 0.5);
         return mix(posOrbit(t, id, seed, phase, speed, minDim, aspectX),
                    posPulse(t, id, seed, minDim, aspectX), bl);
     }
-    if (mode < 5.5) {
+    if (mode < 5.5) { // DRIFT + MATRIX lai
         float bl = 0.5 + 0.5 * sin(t * 0.15 + seed * 0.6);
         return mix(posDrift(t, id, seed, phase, speed),
                    posMatrix(t, id, seed, speed, 13.0, 1.0), bl);
@@ -245,11 +247,13 @@ void main() {
 
     // Mode hiệu dụng (đã blend xong nếu đang transition)
     float modeSel = mix(uMode, uNextMode, uTransitioning * step(0.5, uTransitionT));
-    float fireflyMix = smoothstep(7.4, 7.6, modeSel);   // = 1 trong FIREFLIES
+    float fireflyMix = smoothstep(7.4, 7.6, modeSel);
     float clockMask = smoothstep(5.5, 5.9, modeSel) * (1.0 - smoothstep(6.1, 6.5, modeSel));
 
     vec3 p = positionForMode(uMode, uTime, id, seed, phase, speed);
     if (uTransitioning > 0.5) {
+        // Khớp HTML: from bị đóng băng tại lúc transition bắt đầu; to được lấy ở tStart + 850ms.
+        // Vẫn không cần upload dynamic vertex data mỗi frame.
         vec3 p0 = positionForMode(uMode, uTransitionStartTime, id, seed, phase, speed);
         vec3 p1 = positionForMode(uNextMode, uTransitionStartTime + 0.85, id, seed, phase, speed);
         p = mix(p0, p1, ease3(uTransitionT));
@@ -262,26 +266,25 @@ void main() {
     float sx = uSize.x * 0.5 + (p.x - uCamera.x * depthParallax) * scale;
     float sy = uSize.y * 0.5 + (p.y - uCamera.y * depthParallax) * scale;
 
-    // ─── Twinkle kiểu bụi sao (thay cho spawnFlash cũ) ───
-    // Vòng đời: đỉnh nhọn khi sinh + afterglow mềm, mỗi glyph một nhịp.
+    // Twinkle kiểu bụi sao: đỉnh nhọn khi sinh + afterglow mềm, mỗi glyph một nhịp.
     float age = mod(uTime + ageOffset, life);
     float flashDurMs = mix(180.0, 520.0, hash11(seed + 17.0));
     float flashT = clamp(age * 1000.0 / flashDurMs, 0.0, 1.0);
-    float twinkleCore = pow(1.0 - flashT, 2.4);            // đỉnh nhọn
-    float twinkleAfter = pow(1.0 - flashT, 0.75) * 0.42;   // afterglow
+    float twinkleCore = pow(1.0 - flashT, 2.4);
+    float twinkleAfter = pow(1.0 - flashT, 0.75) * 0.42;
     float twinkle = (twinkleCore + twinkleAfter) * (1.0 - clockMask);
 
     // Shimmer nền: như sao lấp lánh liên tục, tần số riêng mỗi glyph.
-    float shimHz = 1.6 + hash11(seed * 0.13) * 3.4;        // 1.6–5 Hz
+    float shimHz = 1.6 + hash11(seed * 0.13) * 3.4;
     float shimmer = 0.86 + 0.14 * sin(uTime * shimHz + seed * 7.7);
-    shimmer = mix(shimmer, 1.0, clockMask);                // tắt shimmer ở CLOCK
+    shimmer = mix(shimmer, 1.0, clockMask);
 
     // Blink đom đóm: chu kỳ riêng, chớp ngắn (~25% chu kỳ), tắt mềm.
-    float ffHz = 0.16 + hash11(seed * 0.31) * 0.30;        // 0.16–0.46 Hz (≈2–6s)
+    float ffHz = 0.16 + hash11(seed * 0.31) * 0.30;
     float ffPhase = hash11(seed * 0.97) * 6.28318530718;
     float ffCycle = fract(uTime * ffHz + ffPhase);
-    float fireflyBright = exp(-pow((ffCycle - 0.18) * 4.2, 2.0)); // xung Gauss
-    float fireflyEnv = 0.16 + 0.84 * fireflyBright;        // ngoài chớp vẫn mờ 16%
+    float fireflyBright = exp(-pow((ffCycle - 0.18) * 4.2, 2.0));
+    float fireflyEnv = 0.16 + 0.84 * fireflyBright;
 
     // Transition glitch (giữ nguyên cơ chế cũ)
     float transRand = hash11(id * 19.13 + uTransitionSerial * 71.7 + seed);
@@ -290,6 +293,7 @@ void main() {
                            * (1.0 - step(transGlitchDur, uTransitionT * 0.85));
     float glitching = transitionGlitch;
 
+    // Jitter + đổi ký tự theo frame chỉ khi glitch chuyển mode.
     float frameKey = floor(uTime * 30.0);
     float jr = hash11(seed * 3.1 + frameKey * 1.7 + id);
     float jy = hash11(seed * 5.7 + frameKey * 2.3 + id * 0.7);
@@ -307,7 +311,8 @@ void main() {
     float alpha = mix(starAlpha, fireflyAlpha, fireflyMix);
     if (glitching > 0.5) alpha *= mix(0.35, 1.0, hash11(frameKey + seed * 11.0));
 
-    // Palette 4 lớp (kỹ thuật Gemini)
+    // Palette 4 lớp (kỹ thuật Gemini): chọn lớp theo thời gian, nội suy
+    // core -> accent theo chiều sâu để giữ sắc độ ổn định thay vì HSL quay vòng.
     float layerF = mod(uTime * 0.08 + seed * 0.37, 4.0);
     int li = int(layerF);
     int ni = int(mod(layerF + 1.0, 4.0));
@@ -335,9 +340,9 @@ void main() {
     vSym = mix(baseSym, glitchSym, glitching * swapGate);
 
     float sizeMul = 1.0;
-    if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 2.0;
-    else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 2.0;
-    else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 2.0;
+    if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 2.0;      // DRIFT / MATRIX: baseSize x2
+    else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 2.0; // DRIFT+MATRIX lai
+    else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 2.0; // MATRIX REAL
     else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.5; // FIREFLIES
 
     // Twinkle làm glyph phình nhẹ khi lóe; đom đóm phình theo nhịp chớp.
@@ -345,10 +350,28 @@ void main() {
         + twinkleCore * 0.55 * nonFf
         + fireflyBright * 0.30 * fireflyMix;
 
+    // logical pixels -> clip space. Android viewport tự scale lên physical pixels.
     float cx = sx / uSize.x * 2.0 - 1.0;
     float cy = 1.0 - sy / uSize.y * 2.0;
     gl_Position = vec4(cx, cy, 0.0, 1.0);
     gl_PointSize = max(8.0, baseSize * sizeMul * scale) * uDpr * sizePulse;
+}
+"""
+
+private const val K_FRAG = """
+precision mediump float;
+varying vec4 vColor;
+varying float vSym;
+uniform sampler2D uTex;
+
+void main() {
+    vec2 uv = gl_PointCoord;
+    uv.x = (uv.x + vSym) / 16.0;
+    vec4 t = texture2D(uTex, uv);
+    float a = t.a * vColor.a;
+    if (a < 0.01) discard;
+    vec3 brightRgb = min(vec3(1.0), vColor.rgb * 1.1);
+    gl_FragColor = vec4(brightRgb, a);
 }
 """
 
