@@ -343,7 +343,7 @@ void main() {
     if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 2.0;      // DRIFT / MATRIX: baseSize x2
     else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 2.0; // DRIFT+MATRIX lai
     else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 2.0; // MATRIX REAL
-    else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.5; // FIREFLIES
+    else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.7; // FIREFLIES
 
     // Twinkle làm glyph phình nhẹ khi lóe; đom đóm phình theo nhịp chớp.
     float sizePulse = 1.0
@@ -791,7 +791,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
             val logicalW = w / dpr
             val logicalH = h / dpr
-            glyphCount = min(140, max(56, ((logicalW * logicalH) / 7400f).toInt()))
+            glyphCount = min(120, max(52, ((logicalW * logicalH) / 8200f).toInt()))
 
             // 8 float / glyph = 32 bytes. Buffer tĩnh: shader tự animate hoàn toàn.
             val buf = ByteBuffer.allocateDirect(glyphCount * 8 * 4)
@@ -802,7 +802,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 val seed = Random.nextFloat() * 1000f
                 val phase = Random.nextFloat() * (2f * PI.toFloat())
                 val speed = 0.30f + Random.nextFloat() * 0.60f
-                val size = 12f + Random.nextFloat() * 14f
+                val size = 17f + Random.nextFloat() * 19f
                 val life = 5f + Random.nextFloat() * 5f
                 val ageOffset = Random.nextFloat() * life
                 val sym = Random.nextInt(max(1, symCount)).toFloat()
