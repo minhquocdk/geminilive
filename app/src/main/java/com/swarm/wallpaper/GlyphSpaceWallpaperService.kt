@@ -355,7 +355,7 @@ void main() {
     if (glitching > 0.5) rgb = min(vec3(1.0), rgb * 1.25);
     vColor = vec4(rgb, alpha);
 
-    float glitchSym = floor(hash11(frameKey * 13.0 + seed * 31.0 + id) * 9.0);
+    float glitchSym = floor(hash11(frameKey * 13.0 + seed * 31.0 + id) * 30.0);
     float swapGate = step(hash11(frameKey + seed * 7.0), 0.72);
     vSym = mix(baseSym, glitchSym, glitching * swapGate);
 
@@ -386,7 +386,7 @@ uniform sampler2D uTex;
 
 void main() {
     vec2 uv = gl_PointCoord;
-    uv.x = (uv.x + vSym) / 16.0;
+    uv.x = (uv.x + vSym) / 32.0;
     vec4 t = texture2D(uTex, uv);
     float a = t.a * vColor.a;
     if (a < 0.01) discard;
@@ -770,7 +770,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             return true
         }
 
-        // 16 cells × 64 px như gemlive.kt; shader chọn cell bằng vSym.
+        // 32 cells × 64 px (chỉ 30 cell dùng cho K_SYMBOLS, 2 cell đệm);
+        // shader chọn cell bằng vSym với divisor 32.0.
         private fun buildAtlas() {
             val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
@@ -781,14 +782,14 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             var syms = K_SYMBOLS.map { it.toString() }.filter { p.hasGlyph(it) }
             if (syms.isEmpty()) syms = K_SYMBOLS_FALLBACK.map { it.toString() }.filter { p.hasGlyph(it) }
             if (syms.isEmpty()) syms = listOf("+")
-            syms = syms.take(16)
+            syms = syms.take(30)
 
-            val bmp = Bitmap.createBitmap(1024, 64, Bitmap.Config.ARGB_8888)
+            val bmp = Bitmap.createBitmap(2048, 64, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
             val fm = p.fontMetrics
             val baseline = 32f - (fm.ascent + fm.descent) / 2f
-            // Lấp đủ 16 cell bằng cách lặp symbol khả dụng để fallback font không tạo ô rỗng.
-            for (i in 0 until 16) {
+            // Lấp đủ 32 cell (2 cell cuối là bản lặp đệm) để atlas không có ô rỗng.
+            for (i in 0 until 32) {
                 canvas.drawText(syms[i % syms.size], i * 64f + 32f, baseline, p)
             }
 
@@ -816,7 +817,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             // 8 float / glyph = 32 bytes. Buffer tĩnh: shader tự animate hoàn toàn.
             val buf = ByteBuffer.allocateDirect(glyphCount * 8 * 4)
                 .order(ByteOrder.nativeOrder()).asFloatBuffer()
-            val symCount = min(9, K_SYMBOLS.length)
+            val symCount = min(30, K_SYMBOLS.length)
 
             for (i in 0 until glyphCount) {
                 val seed = Random.nextFloat() * 1000f
