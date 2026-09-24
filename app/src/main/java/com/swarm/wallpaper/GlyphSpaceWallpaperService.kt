@@ -58,6 +58,7 @@ private const val K_TILT_Y_PER_DEG = 1.00f
 private const val K_TILT_LIMIT_DEG = 35f
 private const val K_SENSOR_STILL_EPS_DEG = 0.20f
 private const val K_MODE_COUNT = 9
+private const val K_PET_GLYPH_COUNT = 30
 
 // Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
 // shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
@@ -90,6 +91,7 @@ uniform vec3 uAccent[4];  // màu viền 4 lớp
 uniform float uHour;
 uniform float uMinute;
 uniform float uSecond;
+uniform float uPetStart;
 
 varying vec4 vColor;
 varying float vSym;
@@ -266,13 +268,39 @@ void main() {
     float fireflyMix = smoothstep(7.4, 7.6, modeSel);
     float clockMask = smoothstep(5.5, 5.9, modeSel) * (1.0 - smoothstep(6.1, 6.5, modeSel));
 
-    vec3 p = positionForMode(uMode, uTime, id, seed, phase, speed);
-    if (uTransitioning > 0.5) {
-        // Khớp HTML: from bị đóng băng tại lúc transition bắt đầu; to được lấy ở tStart + 850ms.
-        // Vẫn không cần upload dynamic vertex data mỗi frame.
-        vec3 p0 = positionForMode(uMode, uTransitionStartTime, id, seed, phase, speed);
-        vec3 p1 = positionForMode(uNextMode, uTransitionStartTime + 0.85, id, seed, phase, speed);
-        p = mix(p0, p1, ease3(uTransitionT));
+    // Pet glyphs: id >= uPetStart. aA.z (phase) tái dùng làm pet-local X,
+    // aA.w (speed) tái dùng làm pet-local Y (đơn vị chuẩn hoá; nhân petScale).
+    float petMask = step(uPetStart, id);
+    vec3 p;
+    if (petMask > 0.5) {
+        vec2 local = vec2(phase, speed);
+        // Wiggle per-glyph để pet "sống", không đều như khối cứng.
+        local.x += sin(uTime * 3.3 + seed * 5.1) * 0.025;
+        local.y += cos(uTime * 2.7 + seed * 3.9) * 0.025;
+        float petScale = min(uSize.x, uSize.y) * 0.22;
+        float aspect = max(1.0, uSize.x / max(1.0, uSize.y));
+        // Pet nhảy mục tiêu mỗi 4s (hash) rồi ease tới → cảm giác mèo vờn bướm.
+        float cyc = uTime * 0.25;
+        float seg = floor(cyc);
+        float segT = ease3(fract(cyc));
+        vec2 tA = vec2(hash11(seg * 1.7) - 0.5, hash11(seg * 2.3) - 0.5) * 0.65;
+        vec2 tB = vec2(hash11((seg + 1.0) * 1.7) - 0.5, hash11((seg + 1.0) * 2.3) - 0.5) * 0.65;
+        vec2 center = mix(tA, tB, segT) * uSize;
+        center.y += sin(uTime * 1.6) * uSize.y * 0.03;
+        p = vec3(
+            center.x + local.x * petScale * aspect,
+            center.y + local.y * petScale,
+            55.0
+        );
+    } else {
+        p = positionForMode(uMode, uTime, id, seed, phase, speed);
+        if (uTransitioning > 0.5) {
+            // Khớp HTML: from bị đóng băng tại lúc transition bắt đầu; to được lấy ở tStart + 850ms.
+            // Vẫn không cần upload dynamic vertex data mỗi frame.
+            vec3 p0 = positionForMode(uMode, uTransitionStartTime, id, seed, phase, speed);
+            vec3 p1 = positionForMode(uNextMode, uTransitionStartTime + 0.85, id, seed, phase, speed);
+            p = mix(p0, p1, ease3(uTransitionT));
+        }
     }
 
     float z = clamp(p.z, 0.0, 900.0);
@@ -290,7 +318,7 @@ void main() {
     float ffPulse = exp(-pow((cyclePhase - blinkCenter) / blinkWidth, 2.0));
     float twinkleCore = ffPulse;
     float twinkleAfter = ffPulse * 0.35;
-    float twinkle = (twinkleCore + twinkleAfter) * (1.0 - clockMask);
+    float twinkle = (twinkleCore + twinkleAfter) * (1.0 - clockMask) * (1.0 - petMask);
 
     // Shimmer nền: như sao lấp lánh liên tục, tần số riêng mỗi glyph.
     float shimHz = 1.6 + hash11(seed * 0.13) * 3.4;
@@ -319,9 +347,10 @@ void main() {
     sy += glitching * (jy * 6.0 - 3.0);
 
     float edgeFade = sat(min(min(sx, uSize.x - sx), min(sy, uSize.y - sy)) / 80.0);
-    float lifeFadeIn = sat(age / 0.5);
-    float lifeFadeOut = sat((life - age) / 0.8);
+    float lifeFadeIn = mix(sat(age / 0.5), 1.0, petMask);
+    float lifeFadeOut = mix(sat((life - age) / 0.8), 1.0, petMask);
     float baseAlpha = edgeFade * lifeFadeIn * lifeFadeOut * sat(0.25 + scale * 0.95);
+    baseAlpha = mix(baseAlpha, sat(0.35 + scale * 0.95), petMask);
 
     // Alpha: twinkle (bụi sao) vs blink (đom đóm)
     float starAlpha = min(1.0, baseAlpha * shimmer + twinkle * 0.75);
@@ -352,6 +381,12 @@ void main() {
     vec3 fireflyGlow = ffTint * (0.55 + fireflyBright * 0.85);
     rgb = mix(rgb, min(vec3(1.0), fireflyGlow), fireflyMix * 0.72);
 
+    // Pet tint: vàng-cam ấm như linh thú trong ảnh tham chiếu.
+    vec3 petCore = vec3(1.00, 0.62, 0.32);
+    vec3 petGlow = vec3(1.00, 0.92, 0.60);
+    vec3 petColor = mix(petGlow, petCore, 1.0 - scale);
+    rgb = mix(rgb, petColor, petMask * 0.94);
+
     if (glitching > 0.5) rgb = min(vec3(1.0), rgb * 1.25);
     vColor = vec4(rgb, alpha);
 
@@ -360,15 +395,18 @@ void main() {
     vSym = mix(baseSym, glitchSym, glitching * swapGate);
 
     float sizeMul = 1.0;
-    if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 2.0;      // DRIFT / MATRIX: baseSize x2
-    else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 2.0; // DRIFT+MATRIX lai
-    else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 2.0; // MATRIX REAL
-    else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.7; // FIREFLIES
+    if (petMask < 0.5) {
+        if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 2.0;      // DRIFT / MATRIX: baseSize x2
+        else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 2.0; // DRIFT+MATRIX lai
+        else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 2.0; // MATRIX REAL
+        else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.7; // FIREFLIES
+    }
 
     // Twinkle làm glyph phình nhẹ khi lóe; đom đóm phình theo nhịp chớp.
-    float sizePulse = 1.0
-        + twinkleCore * 0.55 * nonFf
-        + fireflyBright * 0.30 * fireflyMix;
+    // Pet giữ kích thước ổn định để silhouette không bị vỡ.
+    float sizePulse = 1.0 + (1.0 - petMask) * (
+        twinkleCore * 0.55 * nonFf
+        + fireflyBright * 0.30 * fireflyMix);
 
     // logical pixels -> clip space. Android viewport tự scale lên physical pixels.
     float cx = sx / uSize.x * 2.0 - 1.0;
@@ -438,6 +476,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locHour = -1
         private var locMinute = -1
         private var locSecond = -1
+        private var locPetStart = -1
 
         private var w = 0
         private var h = 0
@@ -761,6 +800,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locHour = GLES20.glGetUniformLocation(prog, "uHour")
             locMinute = GLES20.glGetUniformLocation(prog, "uMinute")
             locSecond = GLES20.glGetUniformLocation(prog, "uSecond")
+            locPetStart = GLES20.glGetUniformLocation(prog, "uPetStart")
 
             buildAtlas()
             val ids = IntArray(1)
@@ -812,14 +852,15 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
             val logicalW = w / dpr
             val logicalH = h / dpr
-            glyphCount = min(120, max(52, ((logicalW * logicalH) / 8200f).toInt()))
+            val baseGlyphCount = min(120, max(52, ((logicalW * logicalH) / 8200f).toInt()))
+            glyphCount = baseGlyphCount + K_PET_GLYPH_COUNT
 
             // 8 float / glyph = 32 bytes. Buffer tĩnh: shader tự animate hoàn toàn.
             val buf = ByteBuffer.allocateDirect(glyphCount * 8 * 4)
                 .order(ByteOrder.nativeOrder()).asFloatBuffer()
             val symCount = min(30, K_SYMBOLS.length)
 
-            for (i in 0 until glyphCount) {
+            for (i in 0 until baseGlyphCount) {
                 val seed = Random.nextFloat() * 1000f
                 val phase = Random.nextFloat() * (2f * PI.toFloat())
                 val speed = 0.30f + Random.nextFloat() * 0.60f
@@ -835,6 +876,56 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 buf.put(size)
                 buf.put(life)
                 buf.put(ageOffset)
+                buf.put(sym)
+            }
+
+            // Pet glyphs: 30 điểm tạo silhouette mèo con (~30 glyphs như yêu cầu).
+            // aA.z (phase) → pet-local X, aA.w (speed) → pet-local Y.
+            // aB.y/aB.z (life/ageOffset) đặt cố định vì shader bỏ qua fade cho pet.
+            val petShape = floatArrayOf(
+                -0.28f,  0.78f, // left ear tip
+                -0.35f,  0.58f, // left ear outer
+                -0.18f,  0.60f, // left ear inner
+                 0.28f,  0.78f, // right ear tip
+                 0.35f,  0.58f, // right ear outer
+                 0.18f,  0.60f, // right ear inner
+                -0.35f,  0.42f, // head top left
+                 0.35f,  0.42f, // head top right
+                -0.42f,  0.20f, // head side left
+                 0.42f,  0.20f, // head side right
+                -0.16f,  0.34f, // left eye
+                 0.16f,  0.34f, // right eye
+                 0.00f,  0.22f, // nose
+                -0.30f,  0.05f, // left cheek
+                 0.30f,  0.05f, // right cheek
+                 0.00f,  0.02f, // chin
+                -0.30f, -0.10f, // neck left
+                 0.30f, -0.10f, // neck right
+                -0.40f, -0.28f, // body top left
+                 0.40f, -0.28f, // body top right
+                -0.46f, -0.50f, // body mid left
+                 0.46f, -0.50f, // body mid right
+                -0.32f, -0.72f, // body bottom left
+                 0.32f, -0.72f, // body bottom right
+                 0.00f, -0.55f, // body center
+                -0.20f, -0.40f, // belly left
+                 0.20f, -0.40f, // belly right
+                 0.44f, -0.55f, // tail base
+                 0.62f, -0.68f, // tail mid
+                 0.68f, -0.90f  // tail tip
+            )
+            for (i in 0 until K_PET_GLYPH_COUNT) {
+                val seed = Random.nextFloat() * 1000f
+                val size = 11f + Random.nextFloat() * 7f
+                val sym = Random.nextInt(max(1, symCount)).toFloat()
+
+                buf.put((baseGlyphCount + i).toFloat())
+                buf.put(seed)
+                buf.put(petShape[i * 2])      // phase slot = pet local X
+                buf.put(petShape[i * 2 + 1])  // speed slot = pet local Y
+                buf.put(size)
+                buf.put(100f)  // life placeholder (pet bỏ qua fade)
+                buf.put(50f)   // ageOffset placeholder
                 buf.put(sym)
             }
             buf.position(0)
@@ -885,6 +976,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUniform2f(locCamera, cameraX, cameraY)
                 GLES20.glUniform1f(locDpr, dpr)
                 GLES20.glUniform1f(locFocal, K_FOCAL)
+                GLES20.glUniform1f(locPetStart, (glyphCount - K_PET_GLYPH_COUNT).toFloat())
                 GLES20.glUniform3fv(locCore, 4, coreArr, 0)
                 GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
 
