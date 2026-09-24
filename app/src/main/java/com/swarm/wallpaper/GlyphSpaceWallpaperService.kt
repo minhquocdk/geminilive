@@ -109,6 +109,19 @@ vec3 hsl2rgb(float h, float s, float l) {
     return (rgb - 0.5) * c + l;
 }
 
+// Bảng màu đom đóm nhiều màu: mỗi con lấy một màu cố định theo seed.
+vec3 fireflyPalette(float k) {
+    k = fract(k);
+    if (k < 0.125) return vec3(1.00, 0.86, 0.32); // vàng ấm
+    if (k < 0.250) return vec3(0.55, 1.00, 0.70); // mint
+    if (k < 0.375) return vec3(0.45, 0.85, 1.00); // cyan
+    if (k < 0.500) return vec3(1.00, 0.55, 0.75); // hồng
+    if (k < 0.625) return vec3(0.85, 0.65, 1.00); // tím
+    if (k < 0.750) return vec3(1.00, 0.62, 0.35); // cam
+    if (k < 0.875) return vec3(0.70, 1.00, 0.45); // xanh lá
+    return vec3(0.95, 0.90, 1.00);                // trắng xanh
+}
+
 vec3 posOrbit(float t, float id, float seed, float phase, float speed, float minDim, float aspectX) {
     float lane12 = mod(id, 12.0);
     float ring = 0.13 + (lane12 / 11.0) * 0.42;
@@ -266,12 +279,14 @@ void main() {
     float sx = uSize.x * 0.5 + (p.x - uCamera.x * depthParallax) * scale;
     float sy = uSize.y * 0.5 + (p.y - uCamera.y * depthParallax) * scale;
 
-    // Twinkle kiểu bụi sao: đỉnh nhọn khi sinh + afterglow mềm, mỗi glyph một nhịp.
+    // Twinkle → đom đóm nhiều màu: chớp mềm kiểu Gaussian, mỗi con một nhịp.
     float age = mod(uTime + ageOffset, life);
-    float flashDurMs = mix(180.0, 520.0, hash11(seed + 17.0));
-    float flashT = clamp(age * 1000.0 / flashDurMs, 0.0, 1.0);
-    float twinkleCore = pow(1.0 - flashT, 2.4);
-    float twinkleAfter = pow(1.0 - flashT, 0.75) * 0.42;
+    float cyclePhase = age / life;
+    float blinkCenter = 0.14 + hash11(seed * 0.41) * 0.12;
+    float blinkWidth = 0.16 + hash11(seed * 0.67) * 0.10;
+    float ffPulse = exp(-pow((cyclePhase - blinkCenter) / blinkWidth, 2.0));
+    float twinkleCore = ffPulse;
+    float twinkleAfter = ffPulse * 0.35;
     float twinkle = (twinkleCore + twinkleAfter) * (1.0 - clockMask);
 
     // Shimmer nền: như sao lấp lánh liên tục, tần số riêng mỗi glyph.
@@ -322,15 +337,17 @@ void main() {
     float coreMix = clamp((1.0 - scale) * 1.25, 0.0, 1.0);
     vec3 rgb = mix(pc, pa, coreMix);
 
-    // Tint twinkle: trắng ngả accent + lõi trắng sáng
+    // Đom đóm nhiều màu: bảng màu per-glyph, dùng chung cho twinkle và mode FIREFLIES.
     float nonFf = 1.0 - fireflyMix;
-    vec3 sparkleTint = mix(vec3(1.0), pa, 0.35);
-    rgb = mix(rgb, sparkleTint, twinkle * 0.80 * nonFf);
-    rgb = mix(rgb, vec3(1.0), twinkleCore * 0.55 * nonFf);
+    vec3 ffTint = fireflyPalette(hash11(seed * 0.53 + 3.7));
 
-    // Tint đom đóm: vàng ấm, sáng hơn khi chớp
-    vec3 fireflyTint = vec3(1.0, 0.86, 0.32) * (0.55 + fireflyBright * 0.75);
-    rgb = mix(rgb, fireflyTint, fireflyMix * 0.72);
+    // Twinkle = đom đóm lóe theo nhịp sinh
+    rgb = mix(rgb, ffTint, twinkle * 0.85 * nonFf);
+    rgb = mix(rgb, min(vec3(1.0), ffTint * 1.20), twinkleCore * 0.55 * nonFf);
+
+    // Mode FIREFLIES: cùng bảng màu, sáng hơn khi chớp
+    vec3 fireflyGlow = ffTint * (0.55 + fireflyBright * 0.85);
+    rgb = mix(rgb, min(vec3(1.0), fireflyGlow), fireflyMix * 0.72);
 
     if (glitching > 0.5) rgb = min(vec3(1.0), rgb * 1.25);
     vColor = vec4(rgb, alpha);
