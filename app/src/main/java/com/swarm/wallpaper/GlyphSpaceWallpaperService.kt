@@ -173,7 +173,10 @@ vec3 posPulse(float t, float id, float seed, float minDim, float aspectX) {
 // phần glyph còn lại orbit nhẹ quanh mặt số với z lệch tạo cảm giác 3D.
 vec3 posClock(float t, float id, float seed, float phase, float speed, float minDim, float aspectX) {
     float faceR = minDim * 0.40;
-    float role = mod(id, 72.0);
+    // Không mod: role = id để glyph id >= 72 rơi vào vành orbit thay vì
+    // trùng vị trí mốc giờ / kim (marker & kim không dùng phase/speed nên
+    // sẽ đè khít lên nhau nếu bị mod về cùng role).
+    float role = id;
 
     if (role < 12.0) {
         float a = role / 12.0 * 6.28318530718 - 1.57079632679;
