@@ -57,11 +57,7 @@ private const val K_TILT_X_PER_DEG = 1.35f
 private const val K_TILT_Y_PER_DEG = 1.00f
 private const val K_TILT_LIMIT_DEG = 35f
 private const val K_SENSOR_STILL_EPS_DEG = 0.20f
-private const val K_MODE_COUNT = 10
-private const val K_LINE_ALPHA = 0.32f
-private const val K_LINE_R = 0.78f
-private const val K_LINE_G = 0.86f
-private const val K_LINE_B = 1.00f
+private const val K_MODE_COUNT = 9
 
 // Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
 // shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
@@ -232,26 +228,6 @@ vec3 posFirefly(float t, float id, float seed, float phase, float speed) {
     return vec3(cx + wx, cy + wy + bob, z);
 }
 
-// Chòm sao: 3 cụm × 6 glyph (id 0..17) đặt trên tam giác đều, mỗi cụm
-// có orbit nhỏ riêng nên hình dạng co giãn nhẹ nhưng topology liên kết cố định.
-// Các glyph id >= 18 rơi về drift để không chen vào cụm.
-vec3 posConstellation(float t, float id, float seed, float phase, float speed, float minDim, float aspectX) {
-    if (id < 18.0) {
-        float clusterIdx = floor(id / 6.0);
-        float localIdx = mod(id, 6.0);
-        float ca = clusterIdx / 3.0 * 6.28318530718 - 1.57079632679;
-        float clusterR = minDim * 0.30;
-        float cx = cos(ca) * clusterR * aspectX;
-        float cy = sin(ca) * clusterR;
-        float localAngle = localIdx / 6.0 * 6.28318530718 + t * speed * 0.08;
-        float localR = minDim * 0.085;
-        float lx = cos(localAngle) * localR;
-        float ly = sin(localAngle) * localR * 0.7;
-        return vec3(cx + lx, cy + ly, 180.0 + sin(t * 0.5 + seed) * 100.0);
-    }
-    return posDrift(t, id, seed, phase, speed);
-}
-
 vec3 positionForMode(float mode, float t, float id, float seed, float phase, float speed) {
     float minDim = min(uSize.x, uSize.y);
     float aspectX = max(1.0, uSize.x / max(1.0, uSize.y));
@@ -272,8 +248,7 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
     }
     if (mode < 6.5) return posClock(t, id, seed, phase, speed, minDim, aspectX);
     if (mode < 7.5) return posMatrix(t, id, seed, speed, 22.0, 1.6); // MATRIX REAL
-    if (mode < 8.5) return posFirefly(t, id, seed, phase, speed);    // FIREFLIES
-    return posConstellation(t, id, seed, phase, speed, minDim, aspectX); // CONSTELLATION
+    return posFirefly(t, id, seed, phase, speed);                    // FIREFLIES
 }
 
 void main() {
@@ -420,81 +395,6 @@ void main() {
 }
 """
 
-// Line shader: mỗi vertex mang đủ params của cả hai đầu; aEnd chọn đầu nào.
-// Chỉ dùng cho mode CONSTELLATION, alpha bật/tắt theo transition ở CPU.
-private const val K_LINE_VERT = """
-precision highp float;
-
-attribute vec4 aA1;
-attribute vec4 aB1;
-attribute vec4 aA2;
-attribute vec4 aB2;
-attribute float aEnd;
-
-uniform float uTime;
-uniform vec2 uSize;
-uniform vec2 uCamera;
-uniform float uDpr;
-uniform float uFocal;
-
-varying float vFade;
-
-float sat(float x) { return clamp(x, 0.0, 1.0); }
-
-vec3 posConstellation(float t, float id, float seed, float phase, float speed, float minDim, float aspectX) {
-    float clusterIdx = floor(id / 6.0);
-    float localIdx = mod(id, 6.0);
-    float ca = clusterIdx / 3.0 * 6.28318530718 - 1.57079632679;
-    float clusterR = minDim * 0.30;
-    float cx = cos(ca) * clusterR * aspectX;
-    float cy = sin(ca) * clusterR;
-    float localAngle = localIdx / 6.0 * 6.28318530718 + t * speed * 0.08;
-    float localR = minDim * 0.085;
-    float lx = cos(localAngle) * localR;
-    float ly = sin(localAngle) * localR * 0.7;
-    return vec3(cx + lx, cy + ly, 180.0 + sin(t * 0.5 + seed) * 100.0);
-}
-
-void main() {
-    float minDim = min(uSize.x, uSize.y);
-    float aspectX = max(1.0, uSize.x / max(1.0, uSize.y));
-
-    vec3 p1 = posConstellation(uTime, aA1.x, aA1.y, aA1.z, aA1.w, minDim, aspectX);
-    vec3 p2 = posConstellation(uTime, aA2.x, aA2.y, aA2.z, aA2.w, minDim, aspectX);
-
-    // Đường nối chỉ hiện khi cả hai đầu còn "sống" (life fade).
-    float age1 = mod(uTime + aB1.z, aB1.y);
-    float age2 = mod(uTime + aB2.z, aB2.y);
-    float lifeA = sat(age1 / 0.5) * sat((aB1.y - age1) / 0.8);
-    float lifeB = sat(age2 / 0.5) * sat((aB2.y - age2) / 0.8);
-    vFade = min(lifeA, lifeB);
-
-    vec3 p = mix(p1, p2, aEnd);
-
-    float z = clamp(p.z, 0.0, 900.0);
-    float scale = uFocal / (uFocal + z);
-    float depthParallax = 0.35 + (1.0 - scale) * 1.4;
-    float sx = uSize.x * 0.5 + (p.x - uCamera.x * depthParallax) * scale;
-    float sy = uSize.y * 0.5 + (p.y - uCamera.y * depthParallax) * scale;
-
-    float cx = sx / uSize.x * 2.0 - 1.0;
-    float cy = 1.0 - sy / uSize.y * 2.0;
-    gl_Position = vec4(cx, cy, 0.0, 1.0);
-}
-"""
-
-private const val K_LINE_FRAG = """
-precision mediump float;
-varying float vFade;
-uniform vec3 uLineColor;
-uniform float uLineAlpha;
-void main() {
-    float a = uLineAlpha * vFade;
-    if (a < 0.005) discard;
-    gl_FragColor = vec4(uLineColor, a);
-}
-"""
-
 // ───────────────────────── WALLPAPER SERVICE ─────────────────────────
 class GlyphSpaceWallpaperService : WallpaperService() {
     override fun onCreateEngine(): Engine = KEngine()
@@ -518,26 +418,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var prog = 0
         private var vbo = 0
         private var tex = 0
-
-        // Chòm sao: chương trình + VBO riêng cho đường nối GL_LINES.
-        private var lineProg = 0
-        private var lineVbo = 0
-        private var lineVertCount = 0
-        private var locLineA1 = -1
-        private var locLineB1 = -1
-        private var locLineA2 = -1
-        private var locLineB2 = -1
-        private var locLineEnd = -1
-        private var locLineTime = -1
-        private var locLineSize = -1
-        private var locLineCamera = -1
-        private var locLineDpr = -1
-        private var locLineFocal = -1
-        private var locLineColor = -1
-        private var locLineAlpha = -1
-
-        // Params mỗi glyph lưu CPU-side (8 float) để build topology line tĩnh.
-        private val glyphFloatData = FloatArray(120 * 8)
 
         private var locA = -1
         private var locB = -1
@@ -886,45 +766,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             val ids = IntArray(1)
             GLES20.glGenBuffers(1, ids, 0)
             vbo = ids[0]
-
-            if (!initLineGL()) return false
-            val lids = IntArray(1)
-            GLES20.glGenBuffers(1, lids, 0)
-            lineVbo = lids[0]
-
             if (w > 0 && h > 0) rebuildGlyphVbo()
-            return true
-        }
-
-        // Compile chương trình line riêng; fail không làm hỏng mode khác.
-        private fun initLineGL(): Boolean {
-            val vs = compile(GLES20.GL_VERTEX_SHADER, K_LINE_VERT)
-            val fs = compile(GLES20.GL_FRAGMENT_SHADER, K_LINE_FRAG)
-            if (vs == 0 || fs == 0) return false
-
-            lineProg = GLES20.glCreateProgram()
-            GLES20.glAttachShader(lineProg, vs)
-            GLES20.glAttachShader(lineProg, fs)
-            GLES20.glLinkProgram(lineProg)
-            GLES20.glDeleteShader(vs)
-            GLES20.glDeleteShader(fs)
-
-            val ok = IntArray(1)
-            GLES20.glGetProgramiv(lineProg, GLES20.GL_LINK_STATUS, ok, 0)
-            if (ok[0] == 0) return false
-
-            locLineA1 = GLES20.glGetAttribLocation(lineProg, "aA1")
-            locLineB1 = GLES20.glGetAttribLocation(lineProg, "aB1")
-            locLineA2 = GLES20.glGetAttribLocation(lineProg, "aA2")
-            locLineB2 = GLES20.glGetAttribLocation(lineProg, "aB2")
-            locLineEnd = GLES20.glGetAttribLocation(lineProg, "aEnd")
-            locLineTime = GLES20.glGetUniformLocation(lineProg, "uTime")
-            locLineSize = GLES20.glGetUniformLocation(lineProg, "uSize")
-            locLineCamera = GLES20.glGetUniformLocation(lineProg, "uCamera")
-            locLineDpr = GLES20.glGetUniformLocation(lineProg, "uDpr")
-            locLineFocal = GLES20.glGetUniformLocation(lineProg, "uFocal")
-            locLineColor = GLES20.glGetUniformLocation(lineProg, "uLineColor")
-            locLineAlpha = GLES20.glGetUniformLocation(lineProg, "uLineAlpha")
             return true
         }
 
@@ -994,16 +836,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 buf.put(life)
                 buf.put(ageOffset)
                 buf.put(sym)
-
-                val g = i * 8
-                glyphFloatData[g] = i.toFloat()
-                glyphFloatData[g + 1] = seed
-                glyphFloatData[g + 2] = phase
-                glyphFloatData[g + 3] = speed
-                glyphFloatData[g + 4] = size
-                glyphFloatData[g + 5] = life
-                glyphFloatData[g + 6] = ageOffset
-                glyphFloatData[g + 7] = sym
             }
             buf.position(0)
 
@@ -1012,51 +844,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             }
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, glyphCount * 8 * 4, buf, GLES20.GL_STATIC_DRAW)
-
-            rebuildLineVbo()
-        }
-
-        // Topology line cố định: 3 cụm × 6 glyph, fully-connected (15 edge/cụm = 45).
-        // Mỗi vertex mang đủ params 2 đầu (16 float) + aEnd (1 float) = 17 float/vertex.
-        private fun rebuildLineVbo() {
-            if (lineVbo == 0 || lineProg == 0) return
-            if (w <= 0 || h <= 0 || glyphCount < 18) {
-                lineVertCount = 0
-                return
-            }
-
-            val floats = ArrayList<Float>(45 * 34)
-            for (c in 0 until 3) {
-                val base = c * 6
-                for (i in 0 until 6) {
-                    for (j in i + 1 until 6) {
-                        val a = base + i
-                        val b = base + j
-                        if (a >= glyphCount || b >= glyphCount) continue
-                        for (end in 0..1) {
-                            for (k in 0 until 8) floats.add(glyphFloatData[a * 8 + k])
-                            for (k in 0 until 8) floats.add(glyphFloatData[b * 8 + k])
-                            floats.add(end.toFloat())
-                        }
-                    }
-                }
-            }
-            if (floats.isEmpty()) {
-                lineVertCount = 0
-                return
-            }
-            lineVertCount = floats.size / 17
-
-            val buf = ByteBuffer.allocateDirect(floats.size * 4)
-                .order(ByteOrder.nativeOrder()).asFloatBuffer()
-            for (f in floats) buf.put(f)
-            buf.position(0)
-
-            if (dpy != EGL14.EGL_NO_DISPLAY && surf != EGL14.EGL_NO_SURFACE && ctx != EGL14.EGL_NO_CONTEXT) {
-                if (!EGL14.eglMakeCurrent(dpy, surf, surf, ctx)) return
-            }
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, lineVbo)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, floats.size * 4, buf, GLES20.GL_STATIC_DRAW)
         }
 
         // ── khung hình ──
@@ -1125,44 +912,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glDisableVertexAttribArray(locA)
                 GLES20.glDisableVertexAttribArray(locB)
 
-                // Đường nối chòm sao: chỉ vẽ quanh mode CONSTELLATION (index 9), fade theo transition.
-                if (lineProg != 0 && lineVertCount > 0) {
-                    val lineAlpha = when {
-                        modeIndex == 9 && !transitioning -> 1f
-                        modeIndex == 9 && transitioning -> 1f - transitionT
-                        modeIndex == 8 && transitioning -> transitionT
-                        else -> 0f
-                    }
-                    if (lineAlpha > 0.001f) {
-                        GLES20.glUseProgram(lineProg)
-                        GLES20.glUniform1f(locLineTime, timeSec)
-                        GLES20.glUniform2f(locLineSize, w / dpr, h / dpr)
-                        GLES20.glUniform2f(locLineCamera, cameraX, cameraY)
-                        GLES20.glUniform1f(locLineDpr, dpr)
-                        GLES20.glUniform1f(locLineFocal, K_FOCAL)
-                        GLES20.glUniform3f(locLineColor, K_LINE_R, K_LINE_G, K_LINE_B)
-                        GLES20.glUniform1f(locLineAlpha, lineAlpha * K_LINE_ALPHA)
-
-                        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, lineVbo)
-                        GLES20.glEnableVertexAttribArray(locLineA1)
-                        GLES20.glVertexAttribPointer(locLineA1, 4, GLES20.GL_FLOAT, false, 68, 0)
-                        GLES20.glEnableVertexAttribArray(locLineB1)
-                        GLES20.glVertexAttribPointer(locLineB1, 4, GLES20.GL_FLOAT, false, 68, 16)
-                        GLES20.glEnableVertexAttribArray(locLineA2)
-                        GLES20.glVertexAttribPointer(locLineA2, 4, GLES20.GL_FLOAT, false, 68, 32)
-                        GLES20.glEnableVertexAttribArray(locLineB2)
-                        GLES20.glVertexAttribPointer(locLineB2, 4, GLES20.GL_FLOAT, false, 68, 48)
-                        GLES20.glEnableVertexAttribArray(locLineEnd)
-                        GLES20.glVertexAttribPointer(locLineEnd, 1, GLES20.GL_FLOAT, false, 68, 64)
-                        GLES20.glDrawArrays(GLES20.GL_LINES, 0, lineVertCount)
-                        GLES20.glDisableVertexAttribArray(locLineA1)
-                        GLES20.glDisableVertexAttribArray(locLineB1)
-                        GLES20.glDisableVertexAttribArray(locLineA2)
-                        GLES20.glDisableVertexAttribArray(locLineB2)
-                        GLES20.glDisableVertexAttribArray(locLineEnd)
-                    }
-                }
-
                 EGL14.eglSwapBuffers(dpy, surf)
             } catch (_: Exception) {
                 // Wallpaper không được crash launcher vì một frame lỗi/EGL race.
@@ -1175,10 +924,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                     if (ctx != EGL14.EGL_NO_CONTEXT && surf != EGL14.EGL_NO_SURFACE) {
                         EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
                         if (vbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
-                        if (lineVbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(lineVbo), 0)
                         if (tex != 0) GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
                         if (prog != 0) GLES20.glDeleteProgram(prog)
-                        if (lineProg != 0) GLES20.glDeleteProgram(lineProg)
                     }
                     EGL14.eglMakeCurrent(
                         dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT
@@ -1195,9 +942,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             prog = 0
             vbo = 0
             tex = 0
-            lineProg = 0
-            lineVbo = 0
-            lineVertCount = 0
             glReady = false
         }
     }
