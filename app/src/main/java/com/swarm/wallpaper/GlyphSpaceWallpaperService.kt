@@ -270,23 +270,29 @@ void main() {
 
     // Pet glyphs: id >= uPetStart. aA.z (phase) tái dùng làm pet-local X,
     // aA.w (speed) tái dùng làm pet-local Y (đơn vị chuẩn hoá; nhân petScale).
+    // 30 glyph = 5 con firefly × 6 glyph/con (core + 4 cánh + đuôi).
     float petMask = step(uPetStart, id);
     vec3 p;
     if (petMask > 0.5) {
+        float idx = id - uPetStart;
+        float g = floor(idx / 6.0);
+        float sub = mod(idx, 6.0);
+
         vec2 local = vec2(phase, speed);
-        // Wiggle per-glyph để pet "sống", không đều như khối cứng.
-        local.x += sin(uTime * 3.3 + seed * 5.1) * 0.025;
-        local.y += cos(uTime * 2.7 + seed * 3.9) * 0.025;
-        float petScale = min(uSize.x, uSize.y) * 0.22;
+        // Wiggle per-glyph để cánh firefly "thở".
+        local.x += sin(uTime * 4.1 + seed * 5.1 + g) * 0.06;
+        local.y += cos(uTime * 3.5 + seed * 3.9 + g) * 0.06;
+
+        // Mỗi con bay lượn riêng, lệch pha để không trùng nhau.
+        vec2 center = vec2(
+            sin(uTime * (0.31 + g * 0.07) + g * 1.7) * uSize.x * 0.34
+                + sin(uTime * 0.63 + g * 2.3) * uSize.x * 0.09,
+            cos(uTime * (0.27 + g * 0.06) + g * 1.1) * uSize.y * 0.28
+                + cos(uTime * 0.51 + g * 3.1) * uSize.y * 0.07
+        );
+
+        float petScale = min(uSize.x, uSize.y) * 0.052;
         float aspect = max(1.0, uSize.x / max(1.0, uSize.y));
-        // Pet nhảy mục tiêu mỗi 4s (hash) rồi ease tới → cảm giác mèo vờn bướm.
-        float cyc = uTime * 0.25;
-        float seg = floor(cyc);
-        float segT = ease3(fract(cyc));
-        vec2 tA = vec2(hash11(seg * 1.7) - 0.5, hash11(seg * 2.3) - 0.5) * 0.65;
-        vec2 tB = vec2(hash11((seg + 1.0) * 1.7) - 0.5, hash11((seg + 1.0) * 2.3) - 0.5) * 0.65;
-        vec2 center = mix(tA, tB, segT) * uSize;
-        center.y += sin(uTime * 1.6) * uSize.y * 0.03;
         p = vec3(
             center.x + local.x * petScale * aspect,
             center.y + local.y * petScale,
@@ -377,15 +383,14 @@ void main() {
     rgb = mix(rgb, ffTint, twinkle * 0.85 * nonFf);
     rgb = mix(rgb, min(vec3(1.0), ffTint * 1.20), twinkleCore * 0.55 * nonFf);
 
-    // Mode FIREFLIES: cùng bảng màu, sáng hơn khi chớp
-    vec3 fireflyGlow = ffTint * (0.55 + fireflyBright * 0.85);
-    rgb = mix(rgb, min(vec3(1.0), fireflyGlow), fireflyMix * 0.72);
+    // Mode FIREFLIES: giữ nguyên palette 4 lớp, chỉ pulse độ sáng theo nhịp chớp
+    rgb = min(vec3(1.0), rgb * (1.0 + fireflyBright * 0.55 * fireflyMix));
 
-    // Pet tint: vàng-cam ấm như linh thú trong ảnh tham chiếu.
-    vec3 petCore = vec3(1.00, 0.62, 0.32);
-    vec3 petGlow = vec3(1.00, 0.92, 0.60);
+    // Pet tint: vàng ấm đom đóm.
+    vec3 petCore = vec3(1.00, 0.68, 0.20);
+    vec3 petGlow = vec3(1.00, 0.95, 0.55);
     vec3 petColor = mix(petGlow, petCore, 1.0 - scale);
-    rgb = mix(rgb, petColor, petMask * 0.94);
+    rgb = mix(rgb, petColor, petMask * 0.95);
 
     if (glitching > 0.5) rgb = min(vec3(1.0), rgb * 1.25);
     vColor = vec4(rgb, alpha);
@@ -879,50 +884,27 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 buf.put(sym)
             }
 
-            // Pet glyphs: 30 điểm tạo silhouette mèo con (~30 glyphs như yêu cầu).
+            // Pet glyphs: 5 con firefly × 6 glyph/con = 30 glyph.
             // aA.z (phase) → pet-local X, aA.w (speed) → pet-local Y.
             // aB.y/aB.z (life/ageOffset) đặt cố định vì shader bỏ qua fade cho pet.
-            val petShape = floatArrayOf(
-                -0.28f,  0.78f, // left ear tip
-                -0.35f,  0.58f, // left ear outer
-                -0.18f,  0.60f, // left ear inner
-                 0.28f,  0.78f, // right ear tip
-                 0.35f,  0.58f, // right ear outer
-                 0.18f,  0.60f, // right ear inner
-                -0.35f,  0.42f, // head top left
-                 0.35f,  0.42f, // head top right
-                -0.42f,  0.20f, // head side left
-                 0.42f,  0.20f, // head side right
-                -0.16f,  0.34f, // left eye
-                 0.16f,  0.34f, // right eye
-                 0.00f,  0.22f, // nose
-                -0.30f,  0.05f, // left cheek
-                 0.30f,  0.05f, // right cheek
-                 0.00f,  0.02f, // chin
-                -0.30f, -0.10f, // neck left
-                 0.30f, -0.10f, // neck right
-                -0.40f, -0.28f, // body top left
-                 0.40f, -0.28f, // body top right
-                -0.46f, -0.50f, // body mid left
-                 0.46f, -0.50f, // body mid right
-                -0.32f, -0.72f, // body bottom left
-                 0.32f, -0.72f, // body bottom right
-                 0.00f, -0.55f, // body center
-                -0.20f, -0.40f, // belly left
-                 0.20f, -0.40f, // belly right
-                 0.44f, -0.55f, // tail base
-                 0.62f, -0.68f, // tail mid
-                 0.68f, -0.90f  // tail tip
+            val fireflyShape = floatArrayOf(
+                 0.00f,  0.00f, // core
+                 0.75f,  0.55f, // upper-right cánh
+                -0.75f,  0.55f, // upper-left cánh
+                 0.75f, -0.45f, // lower-right cánh
+                -0.75f, -0.45f, // lower-left cánh
+                 0.00f, -1.05f  // đuôi
             )
             for (i in 0 until K_PET_GLYPH_COUNT) {
                 val seed = Random.nextFloat() * 1000f
-                val size = 11f + Random.nextFloat() * 7f
+                val size = 9f + Random.nextFloat() * 6f
                 val sym = Random.nextInt(max(1, symCount)).toFloat()
+                val sub = i % 6
 
                 buf.put((baseGlyphCount + i).toFloat())
                 buf.put(seed)
-                buf.put(petShape[i * 2])      // phase slot = pet local X
-                buf.put(petShape[i * 2 + 1])  // speed slot = pet local Y
+                buf.put(fireflyShape[sub * 2])      // phase slot = pet local X
+                buf.put(fireflyShape[sub * 2 + 1])  // speed slot = pet local Y
                 buf.put(size)
                 buf.put(100f)  // life placeholder (pet bỏ qua fade)
                 buf.put(50f)   // ageOffset placeholder
