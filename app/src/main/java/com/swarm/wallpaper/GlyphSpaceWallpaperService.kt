@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -58,7 +59,6 @@ private const val K_TILT_Y_PER_DEG = 1.00f
 private const val K_TILT_LIMIT_DEG = 35f
 private const val K_SENSOR_STILL_EPS_DEG = 0.20f
 private const val K_MODE_COUNT = 9
-private const val K_PET_GLYPH_COUNT = 30
 
 // Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
 // shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
@@ -91,7 +91,6 @@ uniform vec3 uAccent[4];  // màu viền 4 lớp
 uniform float uHour;
 uniform float uMinute;
 uniform float uSecond;
-uniform float uPetStart;
 
 varying vec4 vColor;
 varying float vSym;
@@ -268,24 +267,13 @@ void main() {
     float fireflyMix = smoothstep(7.4, 7.6, modeSel);
     float clockMask = smoothstep(5.5, 5.9, modeSel) * (1.0 - smoothstep(6.1, 6.5, modeSel));
 
-    // Pet glyphs: id >= uPetStart. aA.z (phase) tái dùng làm pet-local X,
-    // aA.w (speed) tái dùng làm pet-local Y (đơn vị chuẩn hoá; nhân petScale).
-    // 30 glyph = 5 con firefly × 6 glyph/con (core + 4 cánh + đuôi).
-    float petMask = step(uPetStart, id);
-    vec3 p;
-    if (petMask > 0.5) {
-        // Pet swarm: tái dùng thẳng thuật toán FIREFLIES.
-        float idx = id - uPetStart;
-        p = posFirefly(uTime, idx, seed, phase, speed);
-    } else {
-        p = positionForMode(uMode, uTime, id, seed, phase, speed);
-        if (uTransitioning > 0.5) {
-            // Khớp HTML: from bị đóng băng tại lúc transition bắt đầu; to được lấy ở tStart + 850ms.
-            // Vẫn không cần upload dynamic vertex data mỗi frame.
-            vec3 p0 = positionForMode(uMode, uTransitionStartTime, id, seed, phase, speed);
-            vec3 p1 = positionForMode(uNextMode, uTransitionStartTime + 0.85, id, seed, phase, speed);
-            p = mix(p0, p1, ease3(uTransitionT));
-        }
+    vec3 p = positionForMode(uMode, uTime, id, seed, phase, speed);
+    if (uTransitioning > 0.5) {
+        // Khớp HTML: from bị đóng băng tại lúc transition bắt đầu; to được lấy ở tStart + 850ms.
+        // Vẫn không cần upload dynamic vertex data mỗi frame.
+        vec3 p0 = positionForMode(uMode, uTransitionStartTime, id, seed, phase, speed);
+        vec3 p1 = positionForMode(uNextMode, uTransitionStartTime + 0.85, id, seed, phase, speed);
+        p = mix(p0, p1, ease3(uTransitionT));
     }
 
     float z = clamp(p.z, 0.0, 900.0);
@@ -303,7 +291,7 @@ void main() {
     float ffPulse = exp(-pow((cyclePhase - blinkCenter) / blinkWidth, 2.0));
     float twinkleCore = ffPulse;
     float twinkleAfter = ffPulse * 0.35;
-    float twinkle = (twinkleCore + twinkleAfter) * (1.0 - clockMask) * (1.0 - petMask);
+    float twinkle = (twinkleCore + twinkleAfter) * (1.0 - clockMask);
 
     // Shimmer nền: như sao lấp lánh liên tục, tần số riêng mỗi glyph.
     float shimHz = 1.6 + hash11(seed * 0.13) * 3.4;
@@ -332,15 +320,14 @@ void main() {
     sy += glitching * (jy * 6.0 - 3.0);
 
     float edgeFade = sat(min(min(sx, uSize.x - sx), min(sy, uSize.y - sy)) / 80.0);
-    float lifeFadeIn = mix(sat(age / 0.5), 1.0, petMask);
-    float lifeFadeOut = mix(sat((life - age) / 0.8), 1.0, petMask);
+    float lifeFadeIn = sat(age / 0.5);
+    float lifeFadeOut = sat((life - age) / 0.8);
     float baseAlpha = edgeFade * lifeFadeIn * lifeFadeOut * sat(0.25 + scale * 0.95);
-    baseAlpha = mix(baseAlpha, sat(0.35 + scale * 0.95), petMask);
 
     // Alpha: twinkle (bụi sao) vs blink (đom đóm)
     float starAlpha = min(1.0, baseAlpha * shimmer + twinkle * 0.75);
     float fireflyAlpha = baseAlpha * fireflyEnv * shimmer;
-    float alpha = mix(starAlpha, fireflyAlpha, max(fireflyMix, petMask));
+    float alpha = mix(starAlpha, fireflyAlpha, fireflyMix);
     if (glitching > 0.5) alpha *= mix(0.35, 1.0, hash11(frameKey + seed * 11.0));
 
     // Palette 4 lớp (kỹ thuật Gemini): chọn lớp theo thời gian, nội suy
@@ -362,11 +349,9 @@ void main() {
     rgb = mix(rgb, ffTint, twinkle * 0.85 * nonFf);
     rgb = mix(rgb, min(vec3(1.0), ffTint * 1.20), twinkleCore * 0.55 * nonFf);
 
-    // Mode FIREFLIES: giữ nguyên palette 4 lớp, chỉ pulse độ sáng theo nhịp chớp
-    rgb = min(vec3(1.0), rgb * (1.0 + fireflyBright * 0.55 * fireflyMix));
-
-    // Pet tint: cùng bảng màu per-glyph của FIREFLIES.
-    rgb = mix(rgb, min(vec3(1.0), ffTint * (0.70 + fireflyBright * 0.65)), petMask);
+    // Mode FIREFLIES: cùng bảng màu, sáng hơn khi chớp
+    // vec3 fireflyGlow = ffTint * (0.55 + fireflyBright * 0.85);
+    rgb = mix(rgb, min(vec3(1.0), ffTint), fireflyMix * 0.72);
 
     if (glitching > 0.5) rgb = min(vec3(1.0), rgb * 1.25);
     vColor = vec4(rgb, alpha);
@@ -376,18 +361,15 @@ void main() {
     vSym = mix(baseSym, glitchSym, glitching * swapGate);
 
     float sizeMul = 1.0;
-    if (petMask < 0.5) {
-        if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 2.0;      // DRIFT / MATRIX: baseSize x2
-        else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 2.0; // DRIFT+MATRIX lai
-        else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 2.0; // MATRIX REAL
-        else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.7; // FIREFLIES
-    }
+    if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 2.0;      // DRIFT / MATRIX: baseSize x2
+    else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 2.0; // DRIFT+MATRIX lai
+    else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 2.0; // MATRIX REAL
+    else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.7; // FIREFLIES
 
     // Twinkle làm glyph phình nhẹ khi lóe; đom đóm phình theo nhịp chớp.
-    // Pet giữ kích thước ổn định để silhouette không bị vỡ.
-    float sizePulse = 1.0 + (1.0 - petMask) * (
-        twinkleCore * 0.55 * nonFf
-        + fireflyBright * 0.30 * fireflyMix);
+    float sizePulse = 1.0
+        + twinkleCore * 0.55 * nonFf
+        + fireflyBright * 0.30 * fireflyMix;
 
     // logical pixels -> clip space. Android viewport tự scale lên physical pixels.
     float cx = sx / uSize.x * 2.0 - 1.0;
@@ -457,7 +439,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locHour = -1
         private var locMinute = -1
         private var locSecond = -1
-        private var locPetStart = -1
 
         private var w = 0
         private var h = 0
@@ -587,6 +568,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
         override fun onCreate(surfaceHolder: SurfaceHolder) {
             super.onCreate(surfaceHolder)
+            surfaceHolder.setFormat(PixelFormat.TRANSLUCENT)
             setTouchEventsEnabled(true)
         }
 
@@ -781,7 +763,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locHour = GLES20.glGetUniformLocation(prog, "uHour")
             locMinute = GLES20.glGetUniformLocation(prog, "uMinute")
             locSecond = GLES20.glGetUniformLocation(prog, "uSecond")
-            locPetStart = GLES20.glGetUniformLocation(prog, "uPetStart")
 
             buildAtlas()
             val ids = IntArray(1)
@@ -833,15 +814,14 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
             val logicalW = w / dpr
             val logicalH = h / dpr
-            val baseGlyphCount = min(120, max(52, ((logicalW * logicalH) / 8200f).toInt()))
-            glyphCount = baseGlyphCount + K_PET_GLYPH_COUNT
+            glyphCount = min(120, max(52, ((logicalW * logicalH) / 8200f).toInt()))
 
             // 8 float / glyph = 32 bytes. Buffer tĩnh: shader tự animate hoàn toàn.
             val buf = ByteBuffer.allocateDirect(glyphCount * 8 * 4)
                 .order(ByteOrder.nativeOrder()).asFloatBuffer()
             val symCount = min(30, K_SYMBOLS.length)
 
-            for (i in 0 until baseGlyphCount) {
+            for (i in 0 until glyphCount) {
                 val seed = Random.nextFloat() * 1000f
                 val phase = Random.nextFloat() * (2f * PI.toFloat())
                 val speed = 0.30f + Random.nextFloat() * 0.60f
@@ -857,24 +837,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 buf.put(size)
                 buf.put(life)
                 buf.put(ageOffset)
-                buf.put(sym)
-            }
-
-            // Pet glyphs: dùng thuật toán FIREFLIES nên phase/speed random như glyph thường.
-            for (i in 0 until K_PET_GLYPH_COUNT) {
-                val seed = Random.nextFloat() * 1000f
-                val phase = Random.nextFloat() * (2f * PI.toFloat())
-                val speed = 0.30f + Random.nextFloat() * 0.60f
-                val size = 9f + Random.nextFloat() * 6f
-                val sym = Random.nextInt(max(1, symCount)).toFloat()
-
-                buf.put((baseGlyphCount + i).toFloat())
-                buf.put(seed)
-                buf.put(phase)
-                buf.put(speed)
-                buf.put(size)
-                buf.put(100f)  // life placeholder (pet bỏ qua fade)
-                buf.put(50f)   // ageOffset placeholder
                 buf.put(sym)
             }
             buf.position(0)
@@ -910,7 +872,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
                 if (!EGL14.eglMakeCurrent(dpy, surf, surf, ctx)) return
                 GLES20.glViewport(0, 0, w, h)
-                GLES20.glClearColor(0f, 0f, 0f, 1f)
+                GLES20.glClearColor(0f, 0f, 0f, 0f)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
                 GLES20.glUseProgram(prog)
@@ -925,7 +887,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUniform2f(locCamera, cameraX, cameraY)
                 GLES20.glUniform1f(locDpr, dpr)
                 GLES20.glUniform1f(locFocal, K_FOCAL)
-                GLES20.glUniform1f(locPetStart, (glyphCount - K_PET_GLYPH_COUNT).toFloat())
                 GLES20.glUniform3fv(locCore, 4, coreArr, 0)
                 GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
 
