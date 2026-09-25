@@ -858,7 +858,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, q.size*4, buf, GLES20.GL_STATIC_DRAW)
 
             try {
-                val bmp = assets.open("4.png").use { BitmapFactory.decodeStream(it) }
+                val bmp = assets.open("2.png").use { BitmapFactory.decodeStream(it) }
                 bgW = bmp.width.toFloat(); bgH = bmp.height.toFloat()
                 val t = IntArray(1); GLES20.glGenTextures(1, t, 0); bgTex = t[0]
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex)
