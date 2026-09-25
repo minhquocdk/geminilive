@@ -47,6 +47,14 @@ private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
 
 private class KWave(var radius: Float, val state: Int)
 
+private class MPoly(val pts: FloatArray, val cum: FloatArray, val len: Float) {}
+
+private class MShape(
+    val layer: Int, val weight: Float, val size: Float, val alpha: Float,
+    val jitter: Float, val z: Float, val zj: Float, val disc: Float,
+    val polys: List<MPoly>, val total: Float
+)
+
 // ───────────────────────── SHADER ─────────────────────────
 // Toàn bộ công thức hình học + màu + sóng từ file HTML gốc, chạy trên GPU.
 private const val VERT = """
@@ -568,14 +576,6 @@ class KaleidoWallpaperService : WallpaperService() {
         }
 
         // ── dựng hình mandala ──
-        private class MPoly(val pts: FloatArray, val cum: FloatArray, val len: Float) {}
-
-        private class MShape(
-            val layer: Int, val weight: Float, val size: Float, val alpha: Float,
-            val jitter: Float, val z: Float, val zj: Float, val disc: Float,
-            val polys: List<MPoly>, val total: Float
-        ) {}
-
         private fun circlePoly(radius: Float, segments: Int): FloatArray {
             val a = FloatArray(segments * 2)
             for (i in 0 until segments) {
