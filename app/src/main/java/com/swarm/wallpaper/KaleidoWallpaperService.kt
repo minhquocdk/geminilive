@@ -42,7 +42,7 @@ private const val G_AUTO_WAVE_MS = 8000L  // tự bắn sóng đổi màu mỗi 
 private const val G_SPARK_N = 0.7f        // (dự phòng, không dùng cho mandala)
 private const val G_SIZE_BOOST = 1.0f     // (mặc định) nhân kích thước ký tự
 private const val G_R = 120f              // bán kính mandala (world units)
-private const val G_SYMBOLS = "ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛋᛏ"
+private const val G_SYMBOLS = "ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛋᛏᛒᛖᛗᛚᛝᛟᛞᛥᛦᛧᛨᛩᛪ⌬⎋"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
 
 private class KWave(var radius: Float, val state: Int)
@@ -545,9 +545,9 @@ class KaleidoWallpaperService : WallpaperService() {
             var syms = G_SYMBOLS.map { it.toString() }.filter { p.hasGlyph(it) }
             if (syms.isEmpty()) syms = G_SYMBOLS_FALLBACK.map { it.toString() }.filter { p.hasGlyph(it) }
             if (syms.isEmpty()) syms = listOf("+")
-            syms = syms.take(16)
+            syms = syms.take(32)
 
-            val bmp = Bitmap.createBitmap(1024, 64, Bitmap.Config.ARGB_8888)
+            val bmp = Bitmap.createBitmap(2048, 64, Bitmap.Config.ARGB_8888)
             val cv = Canvas(bmp)
             val fm = p.fontMetrics
             val baseY = 32f - (fm.ascent + fm.descent) / 2f
