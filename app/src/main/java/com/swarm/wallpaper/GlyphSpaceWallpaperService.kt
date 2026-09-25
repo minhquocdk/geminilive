@@ -87,8 +87,6 @@ uniform vec2 uSize;      // logical CSS-like pixels
 uniform vec2 uCamera;    // logical pixels
 uniform float uDpr;
 uniform float uFocal;
-uniform vec2 uRipple;
-uniform float uRippleAge;
 uniform vec3 uCore[4];    // màu lõi 4 lớp (kỹ thuật Gemini)
 uniform vec3 uAccent[4];  // màu viền 4 lớp
 uniform float uHour;
@@ -286,14 +284,6 @@ void main() {
     float sx = uSize.x * 0.5 + (p.x - uCamera.x * depthParallax) * scale;
     float sy = uSize.y * 0.5 + (p.y - uCamera.y * depthParallax) * scale;
 
-    // Ripple chạm: đẩy glyph ra xa điểm chạm, giảm dần theo bán kính và thời gian.
-    vec2 rippleDelta = vec2(sx, sy) - uRipple;
-    float rippleDist = length(rippleDelta) + 0.001;
-    float rippleFall = exp(-uRippleAge * 2.2) * sat(1.0 - rippleDist / 260.0);
-    float ripplePush = rippleFall * 46.0;
-    sx += (rippleDelta.x / rippleDist) * ripplePush;
-    sy += (rippleDelta.y / rippleDist) * ripplePush;
-
     // Twinkle → đom đóm nhiều màu: chớp mềm kiểu Gaussian, mỗi con một nhịp.
     float age = mod(uTime + ageOffset, life);
     float cyclePhase = age / life;
@@ -443,9 +433,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
     private inner class KEngine : Engine() {
         private val handler = Handler(Looper.getMainLooper())
         private val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        private val sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        private val gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
-            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         private val touchSlop = ViewConfiguration.get(this@GlyphSpaceWallpaperService).scaledTouchSlop.toFloat()
         private val dpr: Float
             get() = min(resources.displayMetrics.density, K_MAX_DPR)
@@ -482,8 +469,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locCore = -1
         private var locAccent = -1
         private var locTex = -1
-        private var locRipple = -1
-        private var locRippleAge = -1
         private var locHour = -1
         private var locMinute = -1
         private var locSecond = -1
@@ -506,32 +491,16 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var lastModeSwitchAt = 0L
         private var transitionDurMs = 850f
 
-        // Camera parallax: cùng semantics với HTML (camera.x/y tính bằng logical px).
+        // Camera parallax: chỉ còn offset từ launcher, không dùng gyro.
         private var cameraX = 0f
         private var cameraY = 0f
         private var targetCameraX = 0f
         private var targetCameraY = 0f
         private var launcherCameraX = 0f
-        private var tiltCameraX = 0f
-
-        // Sensor: baseline-relative để không phụ thuộc tư thế máy lúc wallpaper vừa hiện.
-        private var sensorRegistered = false
-        private val gravity = FloatArray(3)
-        private var haveGravity = false
-        private var lastSensorNs = 0L
-        private var baseRoll = 0f
-        private var basePitch = 0f
-        private var haveBaseline = false
-        private var lastRoll = 0f
-        private var lastPitch = 0f
-        private var lastSensorMotionAt = 0L
 
         private var downX = 0f
         private var downY = 0f
         private var dragging = false
-        private var rippleX = 0f
-        private var rippleY = 0f
-        private var rippleStartAt = -100000L
 
         init {
             fillColors(coreArr, K_PALETTE_CORE)
@@ -553,7 +522,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 drawFrame(started)
                 if (!shown) return
 
-                val active = transitioning || dragging || started - lastSensorMotionAt < 220L || started - rippleStartAt < 900L
+                val active = transitioning || dragging
                 val fps = when {
                     active -> K_FPS_ACTIVE
                     pm.isPowerSaveMode -> K_FPS_SAVER
@@ -562,60 +531,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 val spent = SystemClock.uptimeMillis() - started
                 handler.postDelayed(this, max(1L, 1000L / fps - spent))
             }
-        }
-
-        private val sensorListener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                if (!shown || event.values.size < 3) return
-                val nowNs = event.timestamp
-                val dt = if (lastSensorNs == 0L) 0.02f
-                else ((nowNs - lastSensorNs) * 1e-9f).coerceIn(0.001f, 0.1f)
-                lastSensorNs = nowNs
-
-                // TYPE_GRAVITY đã lọc; accelerometer fallback cần low-pass mạnh hơn.
-                val hz = if (event.sensor.type == Sensor.TYPE_GRAVITY) 7f else 3.5f
-                val a = 1f - exp(-2f * PI.toFloat() * hz * dt)
-                if (!haveGravity) {
-                    gravity[0] = event.values[0]
-                    gravity[1] = event.values[1]
-                    gravity[2] = event.values[2]
-                    haveGravity = true
-                } else {
-                    for (i in 0..2) gravity[i] += (event.values[i] - gravity[i]) * a
-                }
-
-                val gx = gravity[0]
-                val gy = gravity[1]
-                val gz = gravity[2]
-                val roll = Math.toDegrees(
-                    atan2(gx.toDouble(), sqrt((gy * gy + gz * gz).toDouble()))
-                ).toFloat()
-                val pitch = Math.toDegrees(
-                    atan2((-gy).toDouble(), sqrt((gx * gx + gz * gz).toDouble()))
-                ).toFloat()
-
-                if (!haveBaseline) {
-                    baseRoll = roll
-                    basePitch = pitch
-                    lastRoll = roll
-                    lastPitch = pitch
-                    haveBaseline = true
-                }
-
-                val moved = abs(roll - lastRoll) + abs(pitch - lastPitch) > K_SENSOR_STILL_EPS_DEG
-                if (moved) {
-                    val dr = (roll - baseRoll).coerceIn(-K_TILT_LIMIT_DEG, K_TILT_LIMIT_DEG)
-                    val dp = (pitch - basePitch).coerceIn(-K_TILT_LIMIT_DEG, K_TILT_LIMIT_DEG)
-                    tiltCameraX = -dr * K_TILT_X_PER_DEG
-                    targetCameraX = tiltCameraX + launcherCameraX
-                    targetCameraY = -dp * K_TILT_Y_PER_DEG
-                    lastSensorMotionAt = SystemClock.uptimeMillis()
-                }
-                lastRoll = roll
-                lastPitch = pitch
-            }
-
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
         }
 
         override fun onCreate(surfaceHolder: SurfaceHolder) {
@@ -639,14 +554,9 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             shown = visible
             handler.removeCallbacks(loop)
             if (visible) {
-                val now = SystemClock.uptimeMillis()
-                lastFrameAt = now
-                lastSensorMotionAt = now
-                haveBaseline = false
-                registerSensors()
+                lastFrameAt = SystemClock.uptimeMillis()
                 handler.post(loop)
             } else {
-                unregisterSensors()
                 dragging = false
             }
         }
@@ -654,7 +564,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         override fun onSurfaceDestroyed(holder: SurfaceHolder) {
             shown = false
             handler.removeCallbacks(loop)
-            unregisterSensors()
             releaseGL()
             super.onSurfaceDestroyed(holder)
         }
@@ -662,7 +571,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         override fun onDestroy() {
             shown = false
             handler.removeCallbacks(loop)
-            unregisterSensors()
             releaseGL()
             super.onDestroy()
         }
@@ -674,9 +582,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                     downX = event.x
                     downY = event.y
                     dragging = false
-                    rippleX = event.x / dpr
-                    rippleY = event.y / dpr
-                    rippleStartAt = SystemClock.uptimeMillis()
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (!dragging) {
@@ -707,7 +612,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             xPixelOffset: Int, yPixelOffset: Int
         ) {
             launcherCameraX = (xOffset - 0.5f) * 26f
-            targetCameraX = tiltCameraX + launcherCameraX
+            targetCameraX = launcherCameraX
             super.onOffsetsChanged(xOffset, yOffset, xOffsetStep, yOffsetStep, xPixelOffset, yPixelOffset)
         }
 
@@ -720,25 +625,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             val nextIdx = (modeIndex + 1) % K_MODE_COUNT
             transitionDurMs = if (modeIndex == 6 || nextIdx == 6) 1400f else K_TRANSITION_MS.toFloat()
             transitioning = true
-        }
-
-        private fun registerSensors() {
-            if (!sensorRegistered && gravitySensor != null) {
-                sensorRegistered = sensorManager.registerListener(
-                    sensorListener, gravitySensor, SensorManager.SENSOR_DELAY_GAME
-                )
-                lastSensorNs = 0L
-                haveGravity = false
-                haveBaseline = false
-            }
-        }
-
-        private fun unregisterSensors() {
-            if (sensorRegistered) sensorManager.unregisterListener(sensorListener)
-            sensorRegistered = false
-            lastSensorNs = 0L
-            haveGravity = false
-            haveBaseline = false
         }
 
         // ── EGL / GL ──
@@ -817,8 +703,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locCore = GLES20.glGetUniformLocation(prog, "uCore")
             locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
-            locRipple = GLES20.glGetUniformLocation(prog, "uRipple")
-            locRippleAge = GLES20.glGetUniformLocation(prog, "uRippleAge")
             locHour = GLES20.glGetUniformLocation(prog, "uHour")
             locMinute = GLES20.glGetUniformLocation(prog, "uMinute")
             locSecond = GLES20.glGetUniformLocation(prog, "uSecond")
@@ -921,7 +805,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
             val logicalW = w / dpr
             val logicalH = h / dpr
-            glyphCount = min(120, max(52, ((logicalW * logicalH) / 8200f).toInt()))
+            // Không clamp: máy nào cũng nạp đủ số glyph theo diện tích màn hình.
+            glyphCount = max(1, ((logicalW * logicalH) / 8200f).toInt())
 
             // 8 float / glyph = 32 bytes. Buffer tĩnh: shader tự animate hoàn toàn.
             val buf = ByteBuffer.allocateDirect(glyphCount * 8 * 4)
@@ -1006,10 +891,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                     locSecond,
                     cal.get(java.util.Calendar.SECOND).toFloat() + cal.get(java.util.Calendar.MILLISECOND) / 1000f
                 )
-
-                val rippleAge = (now - rippleStartAt).toFloat() / 1000f
-                GLES20.glUniform2f(locRipple, rippleX, rippleY)
-                GLES20.glUniform1f(locRippleAge, rippleAge)
 
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
