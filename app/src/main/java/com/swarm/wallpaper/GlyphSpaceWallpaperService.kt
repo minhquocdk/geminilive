@@ -153,8 +153,7 @@ vec3 posMatrix(float t, float id, float seed, float speed, float colCount, float
     float travel = mod(t * (90.0 + speed * 130.0) * speedMul + seed * 800.0, uSize.y * 1.7)
                  - uSize.y * 0.85;
     float pulse = sin(t * 0.8 + seed) * 18.0;
-    float dcRaw = mod(t * (70.0 + speed * 55.0) + seed * 500.0, 1440.0);
-    float depthCycle = dcRaw < 720.0 ? dcRaw : 1440.0 - dcRaw;
+    float depthCycle = mod(t * (70.0 + speed * 55.0) + seed * 500.0, 720.0);
     return vec3(col + pulse, travel, 40.0 + depthCycle);
 }
 
@@ -288,16 +287,15 @@ void main() {
     float age = mod(uTime + ageOffset, life);
     float cyclePhase = age / life;
     float blinkCenter = 0.14 + hash11(seed * 0.41) * 0.12;
-    float blinkWidth = 0.28 + hash11(seed * 0.67) * 0.14;
+    float blinkWidth = 0.16 + hash11(seed * 0.67) * 0.10;
     float ffPulse = exp(-pow((cyclePhase - blinkCenter) / blinkWidth, 2.0));
     float twinkleCore = ffPulse;
     float twinkleAfter = ffPulse * 0.35;
     float twinkle = (twinkleCore + twinkleAfter) * (1.0 - clockMask);
 
     // Shimmer nền: như sao lấp lánh liên tục, tần số riêng mỗi glyph.
-    // Ràng theo age để pha nhất quán mỗi lần glyph tái sinh.
     float shimHz = 1.6 + hash11(seed * 0.13) * 3.4;
-    float shimmer = 0.86 + 0.14 * sin(age * shimHz * 6.2831 + seed * 7.7);
+    float shimmer = 0.86 + 0.14 * sin(uTime * shimHz + seed * 7.7);
     shimmer = mix(shimmer, 1.0, clockMask);
 
     // Blink đom đóm: chu kỳ riêng, chớp ngắn (~25% chu kỳ), tắt mềm.
@@ -322,8 +320,8 @@ void main() {
     sy += glitching * (jy * 6.0 - 3.0);
 
     float edgeFade = sat(min(min(sx, uSize.x - sx), min(sy, uSize.y - sy)) / 80.0);
-    float lifeFadeIn = smoothstep(0.0, 1.4, age);
-    float lifeFadeOut = smoothstep(0.0, 1.6, life - age);
+    float lifeFadeIn = sat(age / 0.5);
+    float lifeFadeOut = sat((life - age) / 0.8);
     float baseAlpha = edgeFade * lifeFadeIn * lifeFadeOut * sat(0.25 + scale * 0.95);
 
     // Alpha: twinkle (bụi sao) vs blink (đom đóm)
@@ -909,7 +907,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 val phase = Random.nextFloat() * (2f * PI.toFloat())
                 val speed = 0.30f + Random.nextFloat() * 0.60f
                 val size = 17f + Random.nextFloat() * 19f
-                val life = 9f + Random.nextFloat() * 6f
+                val life = 5f + Random.nextFloat() * 5f
                 val ageOffset = Random.nextFloat() * life
                 val sym = Random.nextInt(max(1, symCount)).toFloat()
 
