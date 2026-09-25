@@ -372,10 +372,10 @@ void main() {
     vSym = mix(baseSym, glitchSym, glitching * swapGate);
 
     float sizeMul = 1.0;
-    if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 1.5;      // DRIFT / MATRIX: baseSize x1.5
-    else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 1.5; // DRIFT+MATRIX lai
-    else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 1.5; // MATRIX REAL
-    else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.7; // FIREFLIES
+    if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 1.2;      // DRIFT / MATRIX: baseSize x1.5
+    else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 1.2; // DRIFT+MATRIX lai
+    else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 1.2; // MATRIX REAL
+    else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.2; // FIREFLIES
 
     // Twinkle làm glyph phình nhẹ khi lóe; đom đóm phình theo nhịp chớp.
     float sizePulse = 1.0
