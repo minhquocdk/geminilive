@@ -375,8 +375,9 @@ void main() {
     // logical pixels -> clip space. Android viewport tự scale lên physical pixels.
     float cx = sx / uSize.x * 2.0 - 1.0;
     float cy = 1.0 - sy / uSize.y * 2.0;
-    gl_Position = vec4(cx, cy, 0.0, 1.0)
-    gl_PointSize = max(8.0, baseSize * sizeMul * scale) * uDpr * sizePulse;
+    gl_Position = vec4(cx, cy, 0.0, 1.0);
+    float sizeRef = minDim / 1440.0; 
+    gl_PointSize = max(8.0, baseSize * sizeMul * scale * sizeRef) * uDpr * sizePulse;
 }
 """
 
@@ -767,6 +768,16 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, bgVbo)
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, q.size*4, buf, GLES20.GL_STATIC_DRAW)
 
+            try {
+                val bmp = assets.open("2.png").use { BitmapFactory.decodeStream(it) }
+                bgW = bmp.width.toFloat(); bgH = bmp.height.toFloat()
+                val t = IntArray(1); GLES20.glGenTextures(1, t, 0); bgTex = t[0]
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex)
+                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                bmp.recycle()
+            } catch (_: Exception) {}
         }
 
         private fun drawBg() {
