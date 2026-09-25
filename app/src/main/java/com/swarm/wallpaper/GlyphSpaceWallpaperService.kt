@@ -33,9 +33,11 @@ import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
@@ -59,6 +61,7 @@ private const val K_TILT_Y_PER_DEG = 1.00f
 private const val K_TILT_LIMIT_DEG = 35f
 private const val K_SENSOR_STILL_EPS_DEG = 0.20f
 private const val K_MODE_COUNT = 9
+private const val K_SPRITE_MAX = 1024
 
 // Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
 // shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
@@ -396,6 +399,36 @@ void main() {
 }
 """
 
+// Sprite pipeline: pet + companion glyphs + rune art trail.
+// Positions are supplied per-vertex in logical pixels (same space as uSize),
+// so the shader only projects — no procedural motion here.
+private const val K_SPRITE_VERT = """
+precision highp float;
+attribute vec2 aPos;
+attribute float aZ;
+attribute vec3 aRgb;
+attribute float aAlpha;
+attribute float aSize;
+attribute float aSym;
+uniform vec2 uSize;
+uniform vec2 uCamera;
+uniform float uDpr;
+uniform float uFocal;
+varying vec4 vColor;
+varying float vSym;
+void main() {
+    float z = clamp(aZ, 0.0, 900.0);
+    float scale = uFocal / (uFocal + z);
+    float depthParallax = 0.35 + (1.0 - scale) * 1.4;
+    float sx = uSize.x * 0.5 + (aPos.x - uCamera.x * depthParallax) * scale;
+    float sy = uSize.y * 0.5 + (aPos.y - uCamera.y * depthParallax) * scale;
+    gl_Position = vec4(sx / uSize.x * 2.0 - 1.0, 1.0 - sy / uSize.y * 2.0, 0.0, 1.0);
+    gl_PointSize = max(8.0, aSize * scale) * uDpr;
+    vColor = vec4(aRgb, aAlpha);
+    vSym = aSym;
+}
+"""
+
 private const val K_BG_VERT = """
 attribute vec2 aP; attribute vec2 aU; varying vec2 vU;
 void main(){ vU=aU; gl_Position=vec4(aP,0.0,1.0); }
@@ -473,6 +506,35 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locHour = -1
         private var locMinute = -1
         private var locSecond = -1
+
+        private var spriteProg = 0
+        private var spriteVbo = 0
+        private var slPos = -1
+        private var slZ = -1
+        private var slRgb = -1
+        private var slAlpha = -1
+        private var slSize = -1
+        private var slSym = -1
+        private var slSizeU = -1
+        private var slCamera = -1
+        private var slDpr = -1
+        private var slFocal = -1
+        private var slTex = -1
+
+        private val spriteBuf = ByteBuffer.allocateDirect(K_SPRITE_MAX * 9 * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+
+        // Pet: one big glyph wandering inside the logical viewport.
+        private var petX = 0f
+        private var petY = 0f
+        private var petTargetX = 0f
+        private var petTargetY = 0f
+        private var petRetargetAt = 0L
+        private var petDepositAcc = 0f
+
+        // Rune art trail. Layout per entry: [x, y, z, sym, r, g, b].
+        // Cleared whenever the mode switches (art belongs to the mode).
+        private val artGlyphs = ArrayList<FloatArray>()
 
         private var w = 0
         private var h = 0
@@ -697,6 +759,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             transitionStartTimeSec = timeSec
             transitionSerial += 1f
             transitioning = true
+            // Art trail is part of the current mode → wipe on switch.
+            artGlyphs.clear()
         }
 
         private fun registerSensors() {
@@ -799,9 +863,11 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
             buildAtlas()
             initBg()
-            val ids = IntArray(1)
-            GLES20.glGenBuffers(1, ids, 0)
+            initSpriteProg()
+            val ids = IntArray(2)
+            GLES20.glGenBuffers(2, ids, 0)
             vbo = ids[0]
+            spriteVbo = ids[1]
             if (w > 0 && h > 0) rebuildGlyphVbo()
             return true
         }
@@ -858,7 +924,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, q.size*4, buf, GLES20.GL_STATIC_DRAW)
 
             try {
-                val bmp = assets.open("2.png").use { BitmapFactory.decodeStream(it) }
+                val bmp = assets.open("4.png").use { BitmapFactory.decodeStream(it) }
                 bgW = bmp.width.toFloat(); bgH = bmp.height.toFloat()
                 val t = IntArray(1); GLES20.glGenTextures(1, t, 0); bgTex = t[0]
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex)
@@ -887,6 +953,169 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glDisableVertexAttribArray(p)
             GLES20.glDisableVertexAttribArray(u)
+        }
+
+        private fun initSpriteProg() {
+            val vs = compile(GLES20.GL_VERTEX_SHADER, K_SPRITE_VERT)
+            val fs = compile(GLES20.GL_FRAGMENT_SHADER, K_FRAG)
+            if (vs == 0 || fs == 0) return
+            spriteProg = GLES20.glCreateProgram()
+            GLES20.glAttachShader(spriteProg, vs)
+            GLES20.glAttachShader(spriteProg, fs)
+            GLES20.glLinkProgram(spriteProg)
+            GLES20.glDeleteShader(vs)
+            GLES20.glDeleteShader(fs)
+            slPos = GLES20.glGetAttribLocation(spriteProg, "aPos")
+            slZ = GLES20.glGetAttribLocation(spriteProg, "aZ")
+            slRgb = GLES20.glGetAttribLocation(spriteProg, "aRgb")
+            slAlpha = GLES20.glGetAttribLocation(spriteProg, "aAlpha")
+            slSize = GLES20.glGetAttribLocation(spriteProg, "aSize")
+            slSym = GLES20.glGetAttribLocation(spriteProg, "aSym")
+            slSizeU = GLES20.glGetUniformLocation(spriteProg, "uSize")
+            slCamera = GLES20.glGetUniformLocation(spriteProg, "uCamera")
+            slDpr = GLES20.glGetUniformLocation(spriteProg, "uDpr")
+            slFocal = GLES20.glGetUniformLocation(spriteProg, "uFocal")
+            slTex = GLES20.glGetUniformLocation(spriteProg, "uTex")
+        }
+
+        // Pet wanders smoothly between random targets inside the logical
+        // viewport and drops a rune every ~16 logical px of travel.
+        private fun updatePet(dt: Float, now: Long) {
+            val lw = w / dpr
+            val lh = h / dpr
+            if (petX == 0f && petY == 0f) {
+                petX = lw * 0.5f
+                petY = lh * 0.5f
+                petTargetX = petX
+                petTargetY = petY
+                petRetargetAt = 0L
+            }
+            if (now >= petRetargetAt) {
+                petRetargetAt = now + 3500L + (Random.nextFloat() * 2500f).toLong()
+                val margin = 90f
+                petTargetX = margin + Random.nextFloat() * max(1f, lw - margin * 2f)
+                petTargetY = margin + Random.nextFloat() * max(1f, lh - margin * 2f)
+            }
+            val dx = petTargetX - petX
+            val dy = petTargetY - petY
+            val dist = sqrt(dx * dx + dy * dy)
+            val step = if (dist > 0.01f) min(dist, 55f * dt) else 0f
+            if (step > 0f) {
+                petX += dx / dist * step
+                petY += dy / dist * step
+            }
+            petDepositAcc += step
+            if (petDepositAcc > 16f) {
+                petDepositAcc = 0f
+                val ci = ((now / 1200L) % 4L).toInt()
+                val c = Color.parseColor(K_PALETTE_CORE[ci])
+                artGlyphs.add(
+                    floatArrayOf(
+                        petX, petY, 40f,
+                        (artGlyphs.size % 30).toFloat(),
+                        Color.red(c) / 255f,
+                        Color.green(c) / 255f,
+                        Color.blue(c) / 255f
+                    )
+                )
+                if (artGlyphs.size > 900) artGlyphs.removeAt(0)
+            }
+        }
+
+        // Writes pet + companions + art trail into spriteBuf, returns vertex count.
+        // Layout: aPos(2) aZ(1) aRgb(3) aAlpha(1) aSize(1) aSym(1) = 9 floats.
+        private fun buildSpriteData(now: Long): Int {
+            spriteBuf.clear()
+            var count = 0
+            val tSec = now / 1000f
+
+            // Companion glyphs orbiting the pet
+            val compCount = 6
+            for (i in 0 until compCount) {
+                val a = tSec * (0.6f + i * 0.07f) + i * 1.047f
+                val r = 40f + (i % 3) * 9f
+                val cx = petX + cos(a) * r
+                val cy = petY + sin(a) * r * 0.75f
+                val c = Color.parseColor(K_PALETTE_ACCENT[i % K_PALETTE_ACCENT.size])
+                spriteBuf.put(cx); spriteBuf.put(cy); spriteBuf.put(55f)
+                spriteBuf.put(Color.red(c) / 255f)
+                spriteBuf.put(Color.green(c) / 255f)
+                spriteBuf.put(Color.blue(c) / 255f)
+                spriteBuf.put(0.85f)
+                spriteBuf.put(34f)
+                spriteBuf.put(((i * 5 + 3) % 30).toFloat())
+                count++
+            }
+
+            // Pet = one big glyph, palette color cycles slowly
+            val petPulse = 1f + 0.08f * sin(tSec * 2.5f)
+            val petC = Color.parseColor(K_PALETTE_CORE[((now / 900L) % 4L).toInt()])
+            spriteBuf.put(petX); spriteBuf.put(petY); spriteBuf.put(28f)
+            spriteBuf.put(Color.red(petC) / 255f)
+            spriteBuf.put(Color.green(petC) / 255f)
+            spriteBuf.put(Color.blue(petC) / 255f)
+            spriteBuf.put(1f)
+            spriteBuf.put(88f * petPulse)
+            spriteBuf.put(((now / 600L) % 30L).toFloat())
+            count++
+
+            // Rune art trail — persists until mode switch
+            for (g in artGlyphs) {
+                spriteBuf.put(g[0]); spriteBuf.put(g[1]); spriteBuf.put(g[2])
+                spriteBuf.put(g[4]); spriteBuf.put(g[5]); spriteBuf.put(g[6])
+                spriteBuf.put(0.9f)
+                spriteBuf.put(26f)
+                spriteBuf.put(g[3])
+                count++
+            }
+            return count
+        }
+
+        private fun drawSprites(now: Long) {
+            if (spriteProg == 0 || spriteVbo == 0) return
+            val count = buildSpriteData(now)
+            if (count == 0) return
+            GLES20.glUseProgram(spriteProg)
+            GLES20.glUniform2f(slSizeU, w / dpr, h / dpr)
+            GLES20.glUniform2f(slCamera, cameraX, cameraY)
+            GLES20.glUniform1f(slDpr, dpr)
+            GLES20.glUniform1f(slFocal, K_FOCAL)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+            GLES20.glUniform1i(slTex, 0)
+
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, spriteVbo)
+            spriteBuf.position(0)
+            spriteBuf.limit(count * 9)
+            GLES20.glBufferData(
+                GLES20.GL_ARRAY_BUFFER, count * 9 * 4, spriteBuf, GLES20.GL_DYNAMIC_DRAW
+            )
+
+            val stride = 9 * 4
+            GLES20.glEnableVertexAttribArray(slPos)
+            GLES20.glVertexAttribPointer(slPos, 2, GLES20.GL_FLOAT, false, stride, 0)
+            GLES20.glEnableVertexAttribArray(slZ)
+            GLES20.glVertexAttribPointer(slZ, 1, GLES20.GL_FLOAT, false, stride, 8)
+            GLES20.glEnableVertexAttribArray(slRgb)
+            GLES20.glVertexAttribPointer(slRgb, 3, GLES20.GL_FLOAT, false, stride, 12)
+            GLES20.glEnableVertexAttribArray(slAlpha)
+            GLES20.glVertexAttribPointer(slAlpha, 1, GLES20.GL_FLOAT, false, stride, 24)
+            GLES20.glEnableVertexAttribArray(slSize)
+            GLES20.glVertexAttribPointer(slSize, 1, GLES20.GL_FLOAT, false, stride, 28)
+            GLES20.glEnableVertexAttribArray(slSym)
+            GLES20.glVertexAttribPointer(slSym, 1, GLES20.GL_FLOAT, false, stride, 32)
+
+            GLES20.glDrawArrays(GLES20.GL_POINTS, 0, count)
+
+            GLES20.glDisableVertexAttribArray(slPos)
+            GLES20.glDisableVertexAttribArray(slZ)
+            GLES20.glDisableVertexAttribArray(slRgb)
+            GLES20.glDisableVertexAttribArray(slAlpha)
+            GLES20.glDisableVertexAttribArray(slSize)
+            GLES20.glDisableVertexAttribArray(slSym)
         }
 
         private fun rebuildGlyphVbo() {
@@ -996,6 +1225,9 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glDisableVertexAttribArray(locA)
                 GLES20.glDisableVertexAttribArray(locB)
 
+                updatePet(dt, now)
+                drawSprites(now)
+
                 EGL14.eglSwapBuffers(dpy, surf)
             } catch (_: Exception) {
                 // Wallpaper không được crash launcher vì một frame lỗi/EGL race.
@@ -1008,8 +1240,10 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                     if (ctx != EGL14.EGL_NO_CONTEXT && surf != EGL14.EGL_NO_SURFACE) {
                         EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
                         if (vbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
+                        if (spriteVbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(spriteVbo), 0)
                         if (tex != 0) GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
                         if (prog != 0) GLES20.glDeleteProgram(prog)
+                        if (spriteProg != 0) GLES20.glDeleteProgram(spriteProg)
                         if (bgVbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(bgVbo), 0)
                         if (bgTex != 0) GLES20.glDeleteTextures(1, intArrayOf(bgTex), 0)
                         if (bgProg != 0) GLES20.glDeleteProgram(bgProg)
@@ -1032,6 +1266,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             bgProg = 0
             bgVbo = 0
             bgTex = 0
+            spriteProg = 0
+            spriteVbo = 0
             glReady = false
         }
     }
