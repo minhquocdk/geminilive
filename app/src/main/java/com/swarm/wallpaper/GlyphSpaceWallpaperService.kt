@@ -404,11 +404,24 @@ private const val K_BG_FRAG = """
 precision mediump float; varying vec2 vU; uniform sampler2D uBg;
 uniform vec2 uScr; uniform vec2 uImg;
 void main(){
+    // vU: (0,0) góc trên-trái, (1,1) góc dưới-phải của màn hình
+    float sA = uScr.x / uScr.y;
+    float iA = uImg.x / uImg.y;
     vec2 uv = vU;
-    float sA = uScr.x/uScr.y, iA = uImg.x/uImg.y;
-    if (sA > iA) uv.y = (uv.y-0.5)*(iA/sA)+0.5;
-    else         uv.x = (uv.x-0.5)*(sA/iA)+0.5;
-    gl_FragColor = texture2D(uBg, uv);
+    if (iA > sA) {
+        // Ảnh rộng hơn màn → letterbox trên/dưới, fit theo bề ngang
+        float f = sA / iA;                 // phần chiều cao màn mà ảnh chiếm
+        uv.y = (uv.y - (1.0 - f)) / f;     // neo ĐÁY: dồn khoảng trống lên trên
+    } else {
+        // Ảnh cao hơn màn → pillar trái/phải, fit theo chiều cao, căn giữa ngang
+        float f = iA / sA;                 // phần chiều rộng màn mà ảnh chiếm
+        uv.x = (uv.x - 0.5) / f + 0.5;
+    }
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);   // vùng trống ngoài ảnh → đen
+    } else {
+        gl_FragColor = texture2D(uBg, uv);
+    }
 }
 """
 
