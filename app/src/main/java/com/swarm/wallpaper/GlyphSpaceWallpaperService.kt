@@ -376,7 +376,8 @@ void main() {
     float cx = sx / uSize.x * 2.0 - 1.0;
     float cy = 1.0 - sy / uSize.y * 2.0;
     gl_Position = vec4(cx, cy, 0.0, 1.0);
-    gl_PointSize = max(8.0, baseSize * sizeMul * scale) * uDpr * sizePulse;
+    float sizeRef = minDim / 1440.0; 
+    gl_PointSize = max(8.0, baseSize * sizeMul * scale * sizeRef) * uDpr * sizePulse;
 }
 """
 
@@ -708,7 +709,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locSecond = GLES20.glGetUniformLocation(prog, "uSecond")
 
             buildAtlas()
-            initBg()
+            //initBg()
             val ids = IntArray(1)
             GLES20.glGenBuffers(1, ids, 0)
             vbo = ids[0]
