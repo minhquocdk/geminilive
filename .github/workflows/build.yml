@@ -23,7 +23,16 @@ jobs:
       - name: Build debug APK
         run: |
           set -o pipefail
-          gradle assembleDebug --no-daemon --stacktrace --info 2>&1 | tee build.log
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+
+      - name: Show errors in summary
+        if: failure()
+        run: |
+          echo "## ❌ Build failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E "^e: |^error:|error:|FAILURE:|Caused by:|> Task .* FAILED" build.log | head -80 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload build log on failure
         if: failure()
@@ -33,9 +42,8 @@ jobs:
           path: build.log
           if-no-files-found: warn
 
-      - name: Upload APK
+      - uses: actions/upload-artifact@v4
         if: success()
-        uses: actions/upload-artifact@v4
         with:
           name: SwarmWallpaper-apk
           path: app/build/outputs/apk/debug/app-debug.apk
