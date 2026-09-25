@@ -402,7 +402,14 @@ void main(){ vU=aU; gl_Position=vec4(aP,0.0,1.0); }
 """
 private const val K_BG_FRAG = """
 precision mediump float; varying vec2 vU; uniform sampler2D uBg;
-void main(){ gl_FragColor = texture2D(uBg, vU); }
+uniform vec2 uScr; uniform vec2 uImg;
+void main(){
+    vec2 uv = vU;
+    float sA = uScr.x/uScr.y, iA = uImg.x/uImg.y;
+    if (sA > iA) uv.y = (uv.y-0.5)*(iA/sA)+0.5;
+    else         uv.x = (uv.x-0.5)*(sA/iA)+0.5;
+    gl_FragColor = texture2D(uBg, uv);
+}
 """
 
 // ───────────────────────── WALLPAPER SERVICE ─────────────────────────
@@ -431,6 +438,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var bgProg = 0
         private var bgTex = 0
         private var bgVbo = 0
+        private var bgW = 1f
+        private var bgH = 1f
 
         private var locA = -1
         private var locB = -1
@@ -836,7 +845,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, q.size*4, buf, GLES20.GL_STATIC_DRAW)
 
             try {
-                val bmp = assets.open("2.png").use { BitmapFactory.decodeStream(it) }
+                val bmp = assets.open("4.png").use { BitmapFactory.decodeStream(it) }
+                bgW = bmp.width.toFloat(); bgH = bmp.height.toFloat()
                 val t = IntArray(1); GLES20.glGenTextures(1, t, 0); bgTex = t[0]
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex)
                 GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
@@ -849,6 +859,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private fun drawBg() {
             if (bgProg == 0 || bgTex == 0) return
             GLES20.glUseProgram(bgProg)
+            GLES20.glUniform2f(GLES20.glGetUniformLocation(bgProg, "uScr"), w/dpr, h/dpr)
+            GLES20.glUniform2f(GLES20.glGetUniformLocation(bgProg, "uImg"), bgW, bgH)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex)
             GLES20.glUniform1i(GLES20.glGetUniformLocation(bgProg, "uBg"), 0)
