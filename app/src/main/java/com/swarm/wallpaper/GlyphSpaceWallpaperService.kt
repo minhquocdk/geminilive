@@ -82,10 +82,13 @@ uniform float uTransitionT;
 uniform float uTransitioning;
 uniform float uTransitionSerial;
 uniform float uTransitionStartTime;
+uniform float uTransitionDur;
 uniform vec2 uSize;      // logical CSS-like pixels
 uniform vec2 uCamera;    // logical pixels
 uniform float uDpr;
 uniform float uFocal;
+uniform vec2 uRipple;
+uniform float uRippleAge;
 uniform vec3 uCore[4];    // màu lõi 4 lớp (kỹ thuật Gemini)
 uniform vec3 uAccent[4];  // màu viền 4 lớp
 uniform float uHour;
@@ -238,12 +241,12 @@ vec3 positionForMode(float mode, float t, float id, float seed, float phase, flo
     if (mode < 2.5) return posMatrix(t, id, seed, speed, 13.0, 1.0);
     if (mode < 3.5) return posPulse(t, id, seed, minDim, aspectX);
     if (mode < 4.5) { // ORBIT + PULSE lai
-        float bl = 0.5 + 0.5 * sin(t * 0.18 + seed * 0.5);
+        float bl = ease3(0.5 + 0.5 * sin(t * 0.07 + seed * 0.5));
         return mix(posOrbit(t, id, seed, phase, speed, minDim, aspectX),
                    posPulse(t, id, seed, minDim, aspectX), bl);
     }
     if (mode < 5.5) { // DRIFT + MATRIX lai
-        float bl = 0.5 + 0.5 * sin(t * 0.15 + seed * 0.6);
+        float bl = ease3(0.5 + 0.5 * sin(t * 0.06 + seed * 0.6));
         return mix(posDrift(t, id, seed, phase, speed),
                    posMatrix(t, id, seed, speed, 13.0, 1.0), bl);
     }
@@ -265,14 +268,14 @@ void main() {
     // Mode hiệu dụng (đã blend xong nếu đang transition)
     float modeSel = mix(uMode, uNextMode, uTransitioning * step(0.5, uTransitionT));
     float fireflyMix = smoothstep(7.4, 7.6, modeSel);
-    float clockMask = smoothstep(5.5, 5.9, modeSel) * (1.0 - smoothstep(6.1, 6.5, modeSel));
+    float clockMask = smoothstep(5.3, 6.0, modeSel) * (1.0 - smoothstep(6.0, 6.7, modeSel));
 
     vec3 p = positionForMode(uMode, uTime, id, seed, phase, speed);
     if (uTransitioning > 0.5) {
         // Khớp HTML: from bị đóng băng tại lúc transition bắt đầu; to được lấy ở tStart + 850ms.
         // Vẫn không cần upload dynamic vertex data mỗi frame.
         vec3 p0 = positionForMode(uMode, uTransitionStartTime, id, seed, phase, speed);
-        vec3 p1 = positionForMode(uNextMode, uTransitionStartTime + 0.85, id, seed, phase, speed);
+        vec3 p1 = positionForMode(uNextMode, uTransitionStartTime + uTransitionDur, id, seed, phase, speed);
         p = mix(p0, p1, ease3(uTransitionT));
     }
 
@@ -282,6 +285,14 @@ void main() {
 
     float sx = uSize.x * 0.5 + (p.x - uCamera.x * depthParallax) * scale;
     float sy = uSize.y * 0.5 + (p.y - uCamera.y * depthParallax) * scale;
+
+    // Ripple chạm: đẩy glyph ra xa điểm chạm, giảm dần theo bán kính và thời gian.
+    vec2 rippleDelta = vec2(sx, sy) - uRipple;
+    float rippleDist = length(rippleDelta) + 0.001;
+    float rippleFall = exp(-uRippleAge * 2.2) * sat(1.0 - rippleDist / 260.0);
+    float ripplePush = rippleFall * 46.0;
+    sx += (rippleDelta.x / rippleDist) * ripplePush;
+    sy += (rippleDelta.y / rippleDist) * ripplePush;
 
     // Twinkle → đom đóm nhiều màu: chớp mềm kiểu Gaussian, mỗi con một nhịp.
     float age = mod(uTime + ageOffset, life);
@@ -361,10 +372,10 @@ void main() {
     vSym = mix(baseSym, glitchSym, glitching * swapGate);
 
     float sizeMul = 1.0;
-    if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 1.2;      // DRIFT / MATRIX: baseSize x1.5
-    else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 1.2; // DRIFT+MATRIX lai
-    else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 1.2; // MATRIX REAL
-    else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.2; // FIREFLIES
+    if (modeSel > 0.5 && modeSel < 2.5) sizeMul = 1.5;      // DRIFT / MATRIX: baseSize x1.5
+    else if (modeSel > 4.5 && modeSel < 5.5) sizeMul = 1.5; // DRIFT+MATRIX lai
+    else if (modeSel > 6.5 && modeSel < 7.5) sizeMul = 1.5; // MATRIX REAL
+    else if (modeSel > 7.5 && modeSel < 8.5) sizeMul = 1.7; // FIREFLIES
 
     // Twinkle làm glyph phình nhẹ khi lóe; đom đóm phình theo nhịp chớp.
     float sizePulse = 1.0
@@ -463,6 +474,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locTransitioning = -1
         private var locTransitionSerial = -1
         private var locTransitionStartTime = -1
+        private var locTransitionDur = -1
         private var locSize = -1
         private var locCamera = -1
         private var locDpr = -1
@@ -470,6 +482,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var locCore = -1
         private var locAccent = -1
         private var locTex = -1
+        private var locRipple = -1
+        private var locRippleAge = -1
         private var locHour = -1
         private var locMinute = -1
         private var locSecond = -1
@@ -490,6 +504,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var transitionStartTimeSec = 0f
         private var transitionSerial = 0f
         private var lastModeSwitchAt = 0L
+        private var transitionDurMs = 850f
 
         // Camera parallax: cùng semantics với HTML (camera.x/y tính bằng logical px).
         private var cameraX = 0f
@@ -514,6 +529,9 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var downX = 0f
         private var downY = 0f
         private var dragging = false
+        private var rippleX = 0f
+        private var rippleY = 0f
+        private var rippleStartAt = -100000L
 
         init {
             fillColors(coreArr, K_PALETTE_CORE)
@@ -535,7 +553,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 drawFrame(started)
                 if (!shown) return
 
-                val active = transitioning || dragging || started - lastSensorMotionAt < 220L
+                val active = transitioning || dragging || started - lastSensorMotionAt < 220L || started - rippleStartAt < 900L
                 val fps = when {
                     active -> K_FPS_ACTIVE
                     pm.isPowerSaveMode -> K_FPS_SAVER
@@ -584,13 +602,13 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                     haveBaseline = true
                 }
 
-                val dr = (roll - baseRoll).coerceIn(-K_TILT_LIMIT_DEG, K_TILT_LIMIT_DEG)
-                val dp = (pitch - basePitch).coerceIn(-K_TILT_LIMIT_DEG, K_TILT_LIMIT_DEG)
-                tiltCameraX = -dr * K_TILT_X_PER_DEG
-                targetCameraX = tiltCameraX + launcherCameraX
-                targetCameraY = -dp * K_TILT_Y_PER_DEG
-
-                if (abs(roll - lastRoll) + abs(pitch - lastPitch) > K_SENSOR_STILL_EPS_DEG) {
+                val moved = abs(roll - lastRoll) + abs(pitch - lastPitch) > K_SENSOR_STILL_EPS_DEG
+                if (moved) {
+                    val dr = (roll - baseRoll).coerceIn(-K_TILT_LIMIT_DEG, K_TILT_LIMIT_DEG)
+                    val dp = (pitch - basePitch).coerceIn(-K_TILT_LIMIT_DEG, K_TILT_LIMIT_DEG)
+                    tiltCameraX = -dr * K_TILT_X_PER_DEG
+                    targetCameraX = tiltCameraX + launcherCameraX
+                    targetCameraY = -dp * K_TILT_Y_PER_DEG
                     lastSensorMotionAt = SystemClock.uptimeMillis()
                 }
                 lastRoll = roll
@@ -656,6 +674,9 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                     downX = event.x
                     downY = event.y
                     dragging = false
+                    rippleX = event.x / dpr
+                    rippleY = event.y / dpr
+                    rippleStartAt = SystemClock.uptimeMillis()
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (!dragging) {
@@ -696,6 +717,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             transitionStartAt = now
             transitionStartTimeSec = timeSec
             transitionSerial += 1f
+            val nextIdx = (modeIndex + 1) % K_MODE_COUNT
+            transitionDurMs = if (modeIndex == 6 || nextIdx == 6) 1400f else K_TRANSITION_MS.toFloat()
             transitioning = true
         }
 
@@ -786,6 +809,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locTransitioning = GLES20.glGetUniformLocation(prog, "uTransitioning")
             locTransitionSerial = GLES20.glGetUniformLocation(prog, "uTransitionSerial")
             locTransitionStartTime = GLES20.glGetUniformLocation(prog, "uTransitionStartTime")
+            locTransitionDur = GLES20.glGetUniformLocation(prog, "uTransitionDur")
             locSize = GLES20.glGetUniformLocation(prog, "uSize")
             locCamera = GLES20.glGetUniformLocation(prog, "uCamera")
             locDpr = GLES20.glGetUniformLocation(prog, "uDpr")
@@ -793,6 +817,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locCore = GLES20.glGetUniformLocation(prog, "uCore")
             locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
+            locRipple = GLES20.glGetUniformLocation(prog, "uRipple")
+            locRippleAge = GLES20.glGetUniformLocation(prog, "uRippleAge")
             locHour = GLES20.glGetUniformLocation(prog, "uHour")
             locMinute = GLES20.glGetUniformLocation(prog, "uMinute")
             locSecond = GLES20.glGetUniformLocation(prog, "uSecond")
@@ -939,7 +965,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
 
                 var transitionT = 0f
                 if (transitioning) {
-                    transitionT = ((now - transitionStartAt).toFloat() / K_TRANSITION_MS).coerceIn(0f, 1f)
+                    transitionT = ((now - transitionStartAt).toFloat() / transitionDurMs).coerceIn(0f, 1f)
                     if (transitionT >= 1f) {
                         modeIndex = (modeIndex + 1) % K_MODE_COUNT
                         transitioning = false
@@ -965,6 +991,7 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUniform1f(locTransitioning, if (transitioning) 1f else 0f)
                 GLES20.glUniform1f(locTransitionSerial, transitionSerial)
                 GLES20.glUniform1f(locTransitionStartTime, transitionStartTimeSec)
+                GLES20.glUniform1f(locTransitionDur, transitionDurMs / 1000f)
                 GLES20.glUniform2f(locSize, w / dpr, h / dpr)
                 GLES20.glUniform2f(locCamera, cameraX, cameraY)
                 GLES20.glUniform1f(locDpr, dpr)
@@ -979,6 +1006,10 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                     locSecond,
                     cal.get(java.util.Calendar.SECOND).toFloat() + cal.get(java.util.Calendar.MILLISECOND) / 1000f
                 )
+
+                val rippleAge = (now - rippleStartAt).toFloat() / 1000f
+                GLES20.glUniform2f(locRipple, rippleX, rippleY)
+                GLES20.glUniform1f(locRippleAge, rippleAge)
 
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
