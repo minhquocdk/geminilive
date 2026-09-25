@@ -26,18 +26,23 @@ import android.view.SurfaceHolder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.max
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val G_PARTICLES = 20000     // số hạt
+private const val G_STRUCTURE = 45000     // số hạt dựng hình mandala
+private const val G_SPARKS = 9000         // số tàn lửa
 private const val G_FPS = 60              // fps bình thường
 private const val G_FPS_SAVER = 15        // fps khi bật Tiết kiệm pin
 private const val G_AUTO_WAVE_MS = 8000L  // tự bắn sóng đổi màu mỗi N ms (0 = tắt, chỉ chạm mới đổi)
-private const val G_SPARK_N = 0.7f        // độ "nhọn" của hình sparkle
-private const val G_SIZE_BOOST = 1.6f     // (mặc định) nhân kích thước ký tự; có thể vuốt để chỉnh
-private const val G_SYMBOLS = "⌖⎋⍕⌬⧉⧇⧻⧼⧽"
+private const val G_SPARK_N = 0.7f        // (dự phòng, không dùng cho mandala)
+private const val G_SIZE_BOOST = 1.0f     // (mặc định) nhân kích thước ký tự
+private const val G_R = 120f              // bán kính mandala (world units)
+private const val G_SYMBOLS = "ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛋᛏ"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×"
 
 private class KWave(var radius: Float, val state: Int)
@@ -45,63 +50,74 @@ private class KWave(var radius: Float, val state: Int)
 // ───────────────────────── SHADER ─────────────────────────
 // Toàn bộ công thức hình học + màu + sóng từ file HTML gốc, chạy trên GPU.
 private const val VERT = """
-attribute vec4 aP;        // x=angle, y=rad, z=zOffset, w=speedScale
+attribute vec3 aPos;      // vị trí gốc (x, y, z)
+attribute vec4 aData;     // layer, size, alpha, colorMix
 attribute float aSym;
 uniform mat4 uMV;
 uniform mat4 uProj;
-uniform float uShape;
-uniform float uState;
 uniform float uPR;
-uniform vec4 uWave[4];    // radius, state, width, active
-uniform vec3 uCore[4];
-uniform vec3 uAccent[4];
+uniform vec4 uLayers;     // góc quay cho 4 lớp
+uniform float uScale;
+uniform vec3 uCore;       // màu chính (rìa)
+uniform vec3 uAccent;     // màu lõi (trung tâm)
+uniform vec4 uWave[4];    // radius, width, active, unused
+uniform vec4 uHover;      // x, y, z, radius (radius < 0 = tắt)
 varying vec3 vColor;
+varying float vAlpha;
 varying float vSym;
 
 void main() {
-    float ang = aP.x;
-    float rad = aP.y;
+    int li = int(aData.x + 0.5);
+    float ang = 0.0;
+    if (li == 0) ang = uLayers.x;
+    else if (li == 1) ang = uLayers.y;
+    else if (li == 2) ang = uLayers.z;
+    else if (li == 3) ang = uLayers.w;
+
     float ca = cos(ang);
     float sa = sin(ang);
-    float e = 2.0 / uShape;
-    float o = pow(max(abs(ca), 0.0001), e) * sign(ca);
-    float s = pow(max(abs(sa), 0.0001), e) * sign(sa);
-    float c2 = cos(2.0 * ang);
-    float rounding = 0.18 * c2 * c2;
-    float k = 120.0 * (1.0 + rad - 0.04);
-    float x = (o * (1.0 - rounding) + ca * rounding) * k;
-    float y = (s * (1.0 - rounding) + sa * rounding) * k;
-    float z = aP.z * 96.0;
-    float dist = max(length(vec3(x, y, z)), 0.001);
+    vec2 rot = vec2(aPos.x * ca - aPos.y * sa, aPos.x * sa + aPos.y * ca);
 
-    float state = uState;
+    vec3 p;
+    p.x = rot.x * uScale;
+    p.y = rot.y * uScale;
+    p.z = aPos.z * uScale;
+
+    float rad = length(rot) * uScale;
+
     float boost = 1.0;
     for (int i = 0; i < 4; i++) {
-        vec4 w = uWave[i];
-        if (w.w > 0.5) {
-            if (dist < w.x) state = w.y;
-            float d = abs(dist - w.x);
-            if (d < w.z) boost = max(boost, 1.0 + (1.0 - d / w.z) * 2.0);
+        vec4 wv = uWave[i];
+        if (wv.z > 0.5) {
+            float d = abs(rad - wv.x);
+            if (d < wv.y) boost = max(boost, 1.0 + (1.0 - d / wv.y) * 2.4);
         }
     }
-    int si = int(state + 0.5);
-    vec3 col = mix(uCore[si], uAccent[si], rad);
-    if (boost > 1.0) col = min(vec3(1.0), col * boost);
+    if (uHover.w > 0.0) {
+        float dh = length(p - uHover.xyz);
+        if (dh < uHover.w) boost = max(boost, 1.0 + (1.0 - dh / uHover.w) * 1.9);
+    }
+
+    vec3 col = mix(uCore, uAccent, aData.w);
+    if (boost > 1.0) {
+        float k = boost - 1.0;
+        col = min(vec3(1.0), col * boost + k * 0.28);
+    }
     vColor = col;
-
-    float fade = 1.0 - clamp((dist - 40.0) / 220.0, 0.0, 1.0);
-    float size = aP.w * (0.8 + fade * 1.8) * (boost > 1.0 ? 1.4 : 1.0);
-
-    vec4 mv = uMV * vec4(x, y, z, 1.0);
-    gl_PointSize = size * uPR * (300.0 / -mv.z);
-    gl_Position = uProj * mv;
+    vAlpha = aData.z * clamp(uScale * 1.2, 0.0, 1.0);
     vSym = aSym;
+
+    vec4 mv = uMV * vec4(p, 1.0);
+    float szMul = (boost > 1.0) ? (1.0 + (boost - 1.0) * 0.45) : 1.0;
+    gl_PointSize = aData.y * uPR * (300.0 / -mv.z) * szMul;
+    gl_Position = uProj * mv;
 }
 """
 
 private const val FRAG = """
 precision mediump float;
 varying vec3 vColor;
+varying float vAlpha;
 varying float vSym;
 uniform sampler2D uTex;
 
@@ -109,8 +125,8 @@ void main() {
     vec2 uv = gl_PointCoord;
     uv.x = (uv.x + vSym) / 16.0;
     vec4 t = texture2D(uTex, uv);
-    if (t.a < 0.1) discard;
-    gl_FragColor = vec4(vColor, t.a);
+    if (t.a < 0.12) discard;
+    gl_FragColor = vec4(vColor, t.a * vAlpha);
 }
 """
 
@@ -132,21 +148,40 @@ class KaleidoWallpaperService : WallpaperService() {
         private var surf: EGLSurface = EGL14.EGL_NO_SURFACE
 
         private var prog = 0
-        private var vbo = 0
+        private var structVbo = 0
+        private var sparkVbo = 0
         private var tex = 0
-        private var locP = 0
+        private var locPos = 0
+        private var locData = 0
         private var locSym = 0
         private var locMV = 0
         private var locProj = 0
-        private var locShape = 0
-        private var locState = 0
         private var locPR = 0
-        private var locWave = 0
+        private var locLayers = 0
+        private var locScale = 0
         private var locCore = 0
         private var locAccent = 0
+        private var locWave = 0
+        private var locHover = 0
         private var locTex = 0
 
         private var glyphCount = 16
+
+        // trạng thái hoạt ảnh mandala
+        private val layerAngles = FloatArray(4)
+        private val spinFactors = floatArrayOf(0.20f, -0.35f, 0.50f, -0.70f)
+        private var reveal = 0f
+
+        // tàn lửa
+        private val spAngle = FloatArray(G_SPARKS)
+        private val spRad = FloatArray(G_SPARKS)
+        private val spSpeed = FloatArray(G_SPARKS)
+        private val spSpin = FloatArray(G_SPARKS)
+        private val spZ = FloatArray(G_SPARKS)
+        private val spBase = FloatArray(G_SPARKS)
+        private val spSym = FloatArray(G_SPARKS)
+        private val sparkBuf = ByteBuffer.allocateDirect(G_SPARKS * 8 * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
 
         private var w = 0
         private var h = 0
@@ -194,8 +229,9 @@ class KaleidoWallpaperService : WallpaperService() {
         }
 
         init {
-            fillColors(coreArr, listOf("#00B95C", "#FFCC00", "#FF4641", "#3186FF"))
-            fillColors(accentArr, listOf("#00A5B7", "#FF6B2B", "#D8627E", "#A975AA"))
+            // coreArr = màu chính (rìa), accentArr = màu lõi (trung tâm)
+            fillColors(coreArr, listOf("#ff7b00", "#e52121", "#00cc99", "#1e70e5"))
+            fillColors(accentArr, listOf("#ffa600", "#ff6b6b", "#66ffcc", "#6ba2ff"))
         }
 
         private fun fillColors(dst: FloatArray, hex: List<String>) {
@@ -235,6 +271,7 @@ class KaleidoWallpaperService : WallpaperService() {
                 startAt = now
                 lastT = now
                 lastWaveAt = now
+                reveal = 0f
                 handler.post(loop)
             }
         }
@@ -460,38 +497,40 @@ class KaleidoWallpaperService : WallpaperService() {
             GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, st, 0)
             if (st[0] == 0) return false
 
-            locP = GLES20.glGetAttribLocation(prog, "aP")
+            locPos = GLES20.glGetAttribLocation(prog, "aPos")
+            locData = GLES20.glGetAttribLocation(prog, "aData")
             locSym = GLES20.glGetAttribLocation(prog, "aSym")
             locMV = GLES20.glGetUniformLocation(prog, "uMV")
             locProj = GLES20.glGetUniformLocation(prog, "uProj")
-            locShape = GLES20.glGetUniformLocation(prog, "uShape")
-            locState = GLES20.glGetUniformLocation(prog, "uState")
             locPR = GLES20.glGetUniformLocation(prog, "uPR")
-            locWave = GLES20.glGetUniformLocation(prog, "uWave")
+            locLayers = GLES20.glGetUniformLocation(prog, "uLayers")
+            locScale = GLES20.glGetUniformLocation(prog, "uScale")
             locCore = GLES20.glGetUniformLocation(prog, "uCore")
             locAccent = GLES20.glGetUniformLocation(prog, "uAccent")
+            locWave = GLES20.glGetUniformLocation(prog, "uWave")
+            locHover = GLES20.glGetUniformLocation(prog, "uHover")
             locTex = GLES20.glGetUniformLocation(prog, "uTex")
 
             glyphCount = buildAtlas().coerceAtLeast(1)
-            val symCount = glyphCount
 
-            // dữ liệu hạt: angle, rad, zOffset, speed, symbol (5 float / hạt)
-            val buf = ByteBuffer.allocateDirect(G_PARTICLES * 5 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-            for (i in 0 until G_PARTICLES) {
-                val r1 = Random.nextFloat()
-                val r5 = r1 * r1 * r1 * r1 * r1
-                buf.put((Random.nextFloat() * 2f * PI).toFloat())
-                buf.put(r5)
-                buf.put(Random.nextFloat() + Random.nextFloat() + Random.nextFloat() - 1.5f)
-                buf.put(0.8f + Random.nextFloat() * 1.2f)
-                buf.put(Random.nextInt(symCount).toFloat())
-            }
-            buf.position(0)
+            // ---- structure VBO: aPos(3) + aData(4) + aSym(1) = 8 float ----
+            val structData = buildStructure()
             val ids = IntArray(1)
             GLES20.glGenBuffers(1, ids, 0)
-            vbo = ids[0]
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_PARTICLES * 5 * 4, buf, GLES20.GL_STATIC_DRAW)
+            structVbo = ids[0]
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, structVbo)
+            val sbuf = ByteBuffer.allocateDirect(G_STRUCTURE * 8 * 4)
+                .order(ByteOrder.nativeOrder()).asFloatBuffer()
+            sbuf.put(structData); sbuf.position(0)
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_STRUCTURE * 8 * 4, sbuf, GLES20.GL_STATIC_DRAW)
+
+            // ---- spark VBO (dynamic) ----
+            GLES20.glGenBuffers(1, ids, 0)
+            sparkVbo = ids[0]
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, sparkVbo)
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_SPARKS * 8 * 4, null, GLES20.GL_DYNAMIC_DRAW)
+
+            initSparks()
             return true
         }
 
@@ -528,12 +567,233 @@ class KaleidoWallpaperService : WallpaperService() {
             return syms.size
         }
 
+        // ── dựng hình mandala ──
+        private class MPoly(val pts: FloatArray, val cum: FloatArray, val len: Float) {}
+
+        private class MShape(
+            val layer: Int, val weight: Float, val size: Float, val alpha: Float,
+            val jitter: Float, val z: Float, val zj: Float, val disc: Float,
+            val polys: List<MPoly>, val total: Float
+        ) {}
+
+        private fun circlePoly(radius: Float, segments: Int): FloatArray {
+            val a = FloatArray(segments * 2)
+            for (i in 0 until segments) {
+                val t = i.toFloat() / segments * 2f * PI.toFloat()
+                a[i * 2] = cos(t) * radius
+                a[i * 2 + 1] = sin(t) * radius
+            }
+            return a
+        }
+
+        private fun starPoly(points: Int, outer: Float, inner: Float, phase: Float): FloatArray {
+            val n = points * 2
+            val a = FloatArray(n * 2)
+            for (i in 0 until n) {
+                val r = if (i % 2 == 0) outer else inner
+                val t = i.toFloat() / n * 2f * PI.toFloat() + phase
+                a[i * 2] = cos(t) * r
+                a[i * 2 + 1] = sin(t) * r
+            }
+            return a
+        }
+
+        private fun squarePoly(half: Float, angle: Float): FloatArray {
+            val c = cos(angle); val s = sin(angle)
+            val cx = floatArrayOf(-half, -half, half, -half, half, half, -half, half)
+            val out = FloatArray(8)
+            for (i in 0 until 4) {
+                val x = cx[i * 2]; val y = cx[i * 2 + 1]
+                out[i * 2] = x * c - y * s
+                out[i * 2 + 1] = x * s + y * c
+            }
+            return out
+        }
+
+        private fun preparePolys(polys: List<FloatArray>): Pair<List<MPoly>, Float> {
+            val out = ArrayList<MPoly>()
+            var total = 0f
+            for (src in polys) {
+                val n = src.size / 2
+                val cum = FloatArray(n + 1)
+                var len = 0f
+                for (i in 0 until n) {
+                    val ax = src[i * 2]; val ay = src[i * 2 + 1]
+                    val j = (i + 1) % n
+                    val bx = src[j * 2]; val by = src[j * 2 + 1]
+                    val dx = bx - ax; val dy = by - ay
+                    len += sqrt(dx * dx + dy * dy)
+                    cum[i + 1] = len
+                }
+                out.add(MPoly(src, cum, len))
+                total += len
+            }
+            return Pair(out, total)
+        }
+
+        private fun buildStructure(): FloatArray {
+            val R = G_R
+            val defs = ArrayList<MShape>()
+
+            fun addPolys(
+                layer: Int, weight: Float, size: Float, alpha: Float,
+                jitter: Float, z: Float, zj: Float, polys: List<FloatArray>
+            ) {
+                val (ps, total) = preparePolys(polys)
+                defs.add(MShape(layer, weight, size, alpha, jitter, z, zj, 0f, ps, total))
+            }
+            fun addDisc(
+                layer: Int, weight: Float, size: Float, alpha: Float,
+                jitter: Float, z: Float, zj: Float, disc: Float
+            ) {
+                defs.add(MShape(layer, weight, size, alpha, jitter, z, zj, disc, emptyList(), 0f))
+            }
+
+            addPolys(0, 0.130f, 2.2f, 0.13f, 0.055f, 0f, 6f, listOf(circlePoly(1.05f * R, 80)))
+            addPolys(0, 0.050f, 2.6f, 0.30f, 0.004f, 0f, 3f, listOf(circlePoly(1.00f * R, 100)))
+            addPolys(0, 0.045f, 2.6f, 0.28f, 0.004f, 0f, 3f, listOf(circlePoly(0.92f * R, 100)))
+            addPolys(0, 0.075f, 7.0f, 0.55f, 0.002f, 0f, 2f, listOf(circlePoly(0.962f * R, 100)))
+            addPolys(1, 0.170f, 2.9f, 0.32f, 0.005f, -5f, 3f,
+                listOf(starPoly(8, 0.86f * R, 0.60f * R, PI.toFloat() / 2f)))
+            addPolys(1, 0.050f, 2.6f, 0.28f, 0.004f, -5f, 3f, listOf(circlePoly(0.60f * R, 80)))
+            addPolys(2, 0.190f, 2.9f, 0.32f, 0.005f, 5f, 3f,
+                listOf(starPoly(12, 0.72f * R, 0.52f * R, 0f)))
+            addPolys(2, 0.040f, 2.5f, 0.26f, 0.004f, 5f, 3f, listOf(circlePoly(0.48f * R, 80)))
+            addPolys(3, 0.130f, 2.7f, 0.30f, 0.005f, 10f, 4f, listOf(
+                squarePoly(0.30f * R, 0f),
+                squarePoly(0.30f * R, PI.toFloat() / 6f),
+                squarePoly(0.30f * R, 2f * PI.toFloat() / 6f),
+                squarePoly(0.30f * R, 3f * PI.toFloat() / 6f)
+            ))
+            addDisc(3, 0.060f, 3.0f, 0.30f, 0f, 0f, 4f, 0.15f)
+
+            var weightSum = 0f
+            for (d in defs) weightSum += d.weight
+            val slots = ArrayList<Int>()
+            for (i in defs.indices) {
+                val cnt = max(1, (defs[i].weight / weightSum * 2048f).toInt())
+                repeat(cnt) { slots.add(i) }
+            }
+            val slotCount = slots.size
+
+            val out = FloatArray(G_STRUCTURE * 8)
+            for (i in 0 until G_STRUCTURE) {
+                val P = defs[slots[Random.nextInt(slotCount)]]
+                val bx: Float
+                val by: Float
+
+                if (P.disc > 0f) {
+                    val a = Random.nextFloat() * 2f * PI.toFloat()
+                    val rr = sqrt(Random.nextFloat()) * P.disc * R
+                    bx = cos(a) * rr
+                    by = sin(a) * rr
+                } else {
+                    var t = Random.nextFloat() * P.total
+                    var poly = P.polys.last()
+                    for (p in P.polys) {
+                        if (t <= p.len) { poly = p; break }
+                        t -= p.len
+                    }
+                    var lo = 0
+                    var hi = poly.cum.size - 1
+                    while (hi - lo > 1) {
+                        val mid = (lo + hi) / 2
+                        if (poly.cum[mid] <= t) lo = mid else hi = mid
+                    }
+                    val segLen = if (poly.cum[lo + 1] - poly.cum[lo] > 0f)
+                        poly.cum[lo + 1] - poly.cum[lo] else 1f
+                    val f = (t - poly.cum[lo]) / segLen
+                    val n = poly.pts.size / 2
+                    val i0 = lo
+                    val i1 = (lo + 1) % n
+                    val x0 = poly.pts[i0 * 2]; val y0 = poly.pts[i0 * 2 + 1]
+                    val x1 = poly.pts[i1 * 2]; val y1 = poly.pts[i1 * 2 + 1]
+                    var x = x0 + (x1 - x0) * f
+                    var y = y0 + (y1 - y0) * f
+                    val ja = Random.nextFloat() * 2f * PI.toFloat()
+                    val jr = (Random.nextFloat() * 0.5f + Random.nextFloat() * 0.5f) * P.jitter * R
+                    x += cos(ja) * jr
+                    y += sin(ja) * jr
+                    bx = x; by = y
+                }
+
+                val bz = P.z + (Random.nextFloat() - 0.5f) * P.zj
+                val rad = sqrt(bx * bx + by * by)
+                val cMix = Math.pow(max(0f, 1f - rad / R).toDouble(), 1.5).toFloat()
+                val sz = P.size * (0.70f + Random.nextFloat() * 0.60f)
+                val al = P.alpha * (0.65f + Random.nextFloat() * 0.70f)
+                val sym = Random.nextInt(glyphCount).toFloat()
+
+                val o = i * 8
+                out[o] = bx; out[o + 1] = by; out[o + 2] = bz
+                out[o + 3] = P.layer.toFloat()
+                out[o + 4] = sz
+                out[o + 5] = al
+                out[o + 6] = cMix
+                out[o + 7] = sym
+            }
+            return out
+        }
+
+        // ── tàn lửa ──
+        private fun initSparks() {
+            for (i in 0 until G_SPARKS) {
+                spSym[i] = Random.nextInt(glyphCount).toFloat()
+                spBase[i] = 2.0f + Random.nextFloat() * 4.5f
+                spZ[i] = (Random.nextFloat() - 0.5f) * 40f
+                respawnSpark(i, true)
+            }
+        }
+
+        private fun respawnSpark(i: Int, warm: Boolean) {
+            spAngle[i] = Random.nextFloat() * 2f * PI.toFloat()
+            spRad[i] = if (warm) (0.05f + Random.nextFloat() * 1.15f)
+            else (0.04f + Random.nextFloat() * 0.10f)
+            spSpeed[i] = 0.14f + Random.nextFloat() * 0.38f
+            spSpin[i] = (Random.nextFloat() - 0.5f) * 2.6f
+        }
+
+        private fun updateSparks(dt: Float, ease: Float, scaleR: Float) {
+            val R = G_R
+            sparkBuf.clear()
+            for (i in 0 until G_SPARKS) {
+                spRad[i] += spSpeed[i] * dt
+                spAngle[i] += spSpin[i] * dt
+                if (spRad[i] > 1.28f) respawnSpark(i, false)
+
+                val r = spRad[i]
+                val a = spAngle[i]
+                val rr = r * R * scaleR
+                val x = cos(a) * rr
+                val y = sin(a) * rr
+                val z = spZ[i] * scaleR
+
+                var t = (r - 0.04f) / 1.24f
+                if (t < 0f) t = 0f else if (t > 1f) t = 1f
+                val fade = sin(PI.toFloat() * t)
+                val cMix = 1f - t * 0.65f
+
+                sparkBuf.put(x)
+                sparkBuf.put(y)
+                sparkBuf.put(z)
+                sparkBuf.put(4f)   // layer = 4 → không xoay
+                sparkBuf.put(spBase[i] * fade * (0.4f + 0.6f * ease))
+                sparkBuf.put(0.85f * fade * ease)
+                sparkBuf.put(cMix)
+                sparkBuf.put(spSym[i])
+            }
+            sparkBuf.position(0)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, sparkVbo)
+            GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, 0, G_SPARKS * 8 * 4, sparkBuf)
+        }
+
         private fun releaseGL() {
             try {
                 if (dpy != EGL14.EGL_NO_DISPLAY) {
                     if (glReady && ctx != EGL14.EGL_NO_CONTEXT && surf != EGL14.EGL_NO_SURFACE) {
                         EGL14.eglMakeCurrent(dpy, surf, surf, ctx)
-                        GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
+                        GLES20.glDeleteBuffers(1, intArrayOf(structVbo), 0)
+                        GLES20.glDeleteBuffers(1, intArrayOf(sparkVbo), 0)
                         GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
                         GLES20.glDeleteProgram(prog)
                     }
@@ -556,81 +816,90 @@ class KaleidoWallpaperService : WallpaperService() {
                 val dt = ((now - lastT) / 1000f).coerceIn(0f, 0.1f)
                 lastT = now
                 animTime += dt
-                morph += dt * 0.5f
+
+                // hoạt ảnh xuất hiện (ease smoothstep)
+                reveal = (reveal + dt * 0.85f).coerceAtMost(1f)
+                val ease = reveal * reveal * (3f - 2f * reveal)
+                val breathe = 1f + 0.015f * sin(animTime * 1.6f)
+                val scaleR = ease * breathe
+
+                for (l in 0 until 4) layerAngles[l] += rotSpeed * spinFactors[l] * dt
 
                 if (autoWaveMs > 0 && now - lastWaveAt > autoWaveMs) triggerWave(now)
 
                 val iter = waves.iterator()
                 while (iter.hasNext()) {
                     val wv = iter.next()
-                    wv.radius += dt * 650f * waveSpeed
-                    if (wv.radius >= 1200f) iter.remove()
+                    wv.radius += dt * 620f * waveSpeed
+                    if (wv.radius >= G_R * 1.8f) iter.remove()
                 }
-
-                // xuất hiện dần: trễ 0.5s rồi lerp 5%/16ms như bản gốc
-                val te = (now - startAt) / 1000f - 0.5f
-                val scale = if (te <= 0f) 0f else 1f - exp(-3.2f * te)
 
                 if (!EGL14.eglMakeCurrent(dpy, surf, surf, ctx)) return
                 GLES20.glViewport(0, 0, w, h)
                 GLES20.glClearColor(0f, 0f, 0f, 1f)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                if (scale > 0.001f) {
-                    // xoay tổng thể như bản gốc
-                    val r = animTime * 0.25f * rotSpeed
-                    val s2 = kotlin.math.sin(r * 2f)
-                    val s1 = kotlin.math.sin(r)
-                    val rx = Math.toDegrees((s2 * s2 * s2 * 0.4f).toDouble()).toFloat()
-                    val ry = Math.toDegrees((s1 * s1 * s1 * 0.6f).toDouble()).toFloat()
-                    val rz = Math.toDegrees((s1 * s1 * s1 * -0.3f).toDouble()).toFloat()
-                    Matrix.setIdentityM(mv, 0)
-                    Matrix.translateM(mv, 0, 0f, 0f, -camZ * camZoom)
-                    Matrix.rotateM(mv, 0, rx, 1f, 0f, 0f)
-                    Matrix.rotateM(mv, 0, ry, 0f, 1f, 0f)
-                    Matrix.rotateM(mv, 0, rz, 0f, 0f, 1f)
-                    Matrix.scaleM(mv, 0, scale, scale, scale)
+                Matrix.setIdentityM(mv, 0)
+                Matrix.translateM(mv, 0, 0f, 0f, -camZ * camZoom)
 
-                    val shape = (3.5f + sparkN) / 2f +
-                        ((3.5f - sparkN) / 2f) * kotlin.math.sin(morph)
+                GLES20.glUseProgram(prog)
+                GLES20.glUniformMatrix4fv(locMV, 1, false, mv, 0)
+                GLES20.glUniformMatrix4fv(locProj, 1, false, proj, 0)
+                GLES20.glUniform1f(locPR, pixelRatio * sizeBoost)
+                GLES20.glUniform1f(locScale, scaleR)
+                GLES20.glUniform4f(locLayers,
+                    layerAngles[0], layerAngles[1], layerAngles[2], layerAngles[3])
+                GLES20.glUniform3f(locCore,
+                    coreArr[stateIndex * 3], coreArr[stateIndex * 3 + 1], coreArr[stateIndex * 3 + 2])
+                GLES20.glUniform3f(locAccent,
+                    accentArr[stateIndex * 3], accentArr[stateIndex * 3 + 1], accentArr[stateIndex * 3 + 2])
 
-                    java.util.Arrays.fill(waveArr, 0f)
-                    for (i in 0 until waves.size) {
-                        waveArr[i * 4] = waves[i].radius
-                        waveArr[i * 4 + 1] = waves[i].state.toFloat()
-                        waveArr[i * 4 + 2] = 80f
-                        waveArr[i * 4 + 3] = 1f
-                    }
-
-                    GLES20.glUseProgram(prog)
-                    GLES20.glUniformMatrix4fv(locMV, 1, false, mv, 0)
-                    GLES20.glUniformMatrix4fv(locProj, 1, false, proj, 0)
-                    GLES20.glUniform1f(locShape, shape)
-                    GLES20.glUniform1f(locState, stateIndex.toFloat())
-                    GLES20.glUniform1f(locPR, pixelRatio * sizeBoost)
-                    GLES20.glUniform4fv(locWave, 4, waveArr, 0)
-                    GLES20.glUniform3fv(locCore, 4, coreArr, 0)
-                    GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
-
-                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
-                    GLES20.glUniform1i(locTex, 0)
-
-                    GLES20.glEnable(GLES20.GL_BLEND)
-                    GLES20.glBlendFuncSeparate(
-                        GLES20.GL_SRC_ALPHA, GLES20.GL_ONE, GLES20.GL_ZERO, GLES20.GL_ONE
-                    )
-
-                    GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
-                    GLES20.glEnableVertexAttribArray(locP)
-                    GLES20.glVertexAttribPointer(locP, 4, GLES20.GL_FLOAT, false, 20, 0)
-                    GLES20.glEnableVertexAttribArray(locSym)
-                    GLES20.glVertexAttribPointer(locSym, 1, GLES20.GL_FLOAT, false, 20, 16)
-                    GLES20.glDrawArrays(GLES20.GL_POINTS, 0, G_PARTICLES)
-                    GLES20.glDisableVertexAttribArray(locP)
-                    GLES20.glDisableVertexAttribArray(locSym)
-
+                java.util.Arrays.fill(waveArr, 0f)
+                for (i in 0 until waves.size) {
+                    waveArr[i * 4] = waves[i].radius
+                    waveArr[i * 4 + 1] = 68f
+                    waveArr[i * 4 + 2] = 1f
+                    waveArr[i * 4 + 3] = 0f
                 }
+                GLES20.glUniform4fv(locWave, 4, waveArr, 0)
+
+                // hover tắt trên wallpaper
+                GLES20.glUniform4f(locHover, 0f, 0f, 0f, -1f)
+
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
+                GLES20.glUniform1i(locTex, 0)
+
+                GLES20.glEnable(GLES20.GL_BLEND)
+                GLES20.glBlendFuncSeparate(
+                    GLES20.GL_SRC_ALPHA, GLES20.GL_ONE, GLES20.GL_ZERO, GLES20.GL_ONE
+                )
+
+                // ---- structure ----
+                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, structVbo)
+                GLES20.glEnableVertexAttribArray(locPos)
+                GLES20.glVertexAttribPointer(locPos, 3, GLES20.GL_FLOAT, false, 32, 0)
+                GLES20.glEnableVertexAttribArray(locData)
+                GLES20.glVertexAttribPointer(locData, 4, GLES20.GL_FLOAT, false, 32, 12)
+                GLES20.glEnableVertexAttribArray(locSym)
+                GLES20.glVertexAttribPointer(locSym, 1, GLES20.GL_FLOAT, false, 32, 28)
+                GLES20.glDrawArrays(GLES20.GL_POINTS, 0, G_STRUCTURE)
+
+                // ---- sparks ----
+                updateSparks(dt, ease, scaleR)
+
+                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, sparkVbo)
+                GLES20.glEnableVertexAttribArray(locPos)
+                GLES20.glVertexAttribPointer(locPos, 3, GLES20.GL_FLOAT, false, 32, 0)
+                GLES20.glEnableVertexAttribArray(locData)
+                GLES20.glVertexAttribPointer(locData, 4, GLES20.GL_FLOAT, false, 32, 12)
+                GLES20.glEnableVertexAttribArray(locSym)
+                GLES20.glVertexAttribPointer(locSym, 1, GLES20.GL_FLOAT, false, 32, 28)
+                GLES20.glDrawArrays(GLES20.GL_POINTS, 0, G_SPARKS)
+
+                GLES20.glDisableVertexAttribArray(locPos)
+                GLES20.glDisableVertexAttribArray(locData)
+                GLES20.glDisableVertexAttribArray(locSym)
 
                 EGL14.eglSwapBuffers(dpy, surf)
             } catch (e: Exception) {
