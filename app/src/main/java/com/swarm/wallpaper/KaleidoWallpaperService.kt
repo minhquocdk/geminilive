@@ -204,21 +204,20 @@ class KaleidoWallpaperService : WallpaperService() {
         private var stateIndex = 0
         private var lastWaveAt = 0L
 
-        // ── thông số chỉnh bằng gesture (mặc định lấy từ hằng số ở trên) ──
-        private var sizeBoost = G_SIZE_BOOST
-        private var sparkN = G_SPARK_N
-        private var rotSpeed = 1f
-        private var waveSpeed = 1f
-        private var camZoom = 1f
-        private var autoWaveMs = G_AUTO_WAVE_MS
+        // ── thông số cố định ──
+        private val sizeBoost = G_SIZE_BOOST
+        private val rotSpeed = 1f
+        private val waveSpeed = 1f
+        private val camZoom = 1f
+        private val autoWaveMs = G_AUTO_WAVE_MS
 
-        // ── gesture state machine: 0=rảnh, 1=1 ngón, 2=2 ngón, 3=3 ngón ──
-        private var gestureMode = 0
-        private var gLastX = 0f
-        private var gLastY = 0f
-        private var gLastDist = 0f
-        private var gDownAt = 0L
-        private var gMoved = 0f
+        // ── tương tác: tap = bắn sóng, kéo 1 ngón = xoay camera ──
+        private var camYaw = 0f
+        private var camPitch = 0f
+        private var dragLastX = 0f
+        private var dragLastY = 0f
+        private var dragDownAt = 0L
+        private var dragMoved = 0f
 
         private val waves = ArrayList<KWave>()
         private val waveArr = FloatArray(16)
@@ -298,146 +297,32 @@ class KaleidoWallpaperService : WallpaperService() {
             super.onDestroy()
         }
 
-        // ── gesture state machine: vuốt 1/2/3 ngón để chỉnh thông số ──
-        //  1 ngón dọc     → kích thước hạt (sizeBoost)
-        //  1 ngón ngang   → độ nhọn sparkle (sparkN)
-        //  2 ngón dọc     → tốc độ xoay tổng thể (rotSpeed)
-        //  2 ngón ngang   → tốc độ lan sóng màu (waveSpeed)
-        //  2 ngón chụm/mở → zoom camera (camZoom)
-        //  3 ngón dọc     → chu kỳ tự bắn sóng đổi màu (autoWaveMs, 0 = tắt)
-        //  tap 1 ngón     → bắn sóng đổi màu
-        //  tap 3 ngón     → reset về giá trị mặc định
+        // ── tương tác: kéo 1 ngón = xoay camera (yaw/pitch), tap = bắn sóng ──
         override fun onTouchEvent(event: MotionEvent) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    gestureMode = 1
-                    beginGesture(event)
+                    dragLastX = event.x
+                    dragLastY = event.y
+                    dragDownAt = SystemClock.uptimeMillis()
+                    dragMoved = 0f
                 }
-                MotionEvent.ACTION_POINTER_DOWN -> {
-                    gestureMode = when {
-                        event.pointerCount >= 3 -> 3
-                        event.pointerCount == 2 -> 2
-                        else -> 1
+                MotionEvent.ACTION_MOVE -> {
+                    if (event.pointerCount == 1) {
+                        val dx = event.x - dragLastX
+                        val dy = event.y - dragLastY
+                        camYaw += dx * 0.35f
+                        camPitch = (camPitch - dy * 0.35f).coerceIn(-85f, 85f)
+                        dragMoved += kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                        dragLastX = event.x
+                        dragLastY = event.y
                     }
-                    beginGesture(event)
                 }
-                MotionEvent.ACTION_POINTER_UP -> {
-                    gestureMode = when {
-                        event.pointerCount - 1 >= 3 -> 3
-                        event.pointerCount - 1 == 2 -> 2
-                        event.pointerCount - 1 == 1 -> 1
-                        else -> 0
-                    }
-                    beginGesture(event)
-                }
-                MotionEvent.ACTION_MOVE -> handleMove(event)
                 MotionEvent.ACTION_UP -> {
-                    val quick = SystemClock.uptimeMillis() - gDownAt < 300L
-                    val tap = gMoved < 20f
-                    when {
-                        gestureMode == 1 && quick && tap -> triggerWave(SystemClock.uptimeMillis())
-                        gestureMode == 3 && quick && tap -> resetParams()
-                    }
-                    gestureMode = 0
+                    val quick = SystemClock.uptimeMillis() - dragDownAt < 300L
+                    if (quick && dragMoved < 20f) triggerWave(SystemClock.uptimeMillis())
                 }
-                MotionEvent.ACTION_CANCEL -> gestureMode = 0
             }
             super.onTouchEvent(event)
-        }
-
-        private fun beginGesture(event: MotionEvent) {
-            gLastX = avgX(event)
-            gLastY = avgY(event)
-            gLastDist = spread(event)
-            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                gDownAt = SystemClock.uptimeMillis()
-                gMoved = 0f
-            }
-        }
-
-        private fun handleMove(event: MotionEvent) {
-            if (gestureMode == 0) return
-            val x = avgX(event)
-            val y = avgY(event)
-            val dx = x - gLastX
-            val dy = y - gLastY
-            val dist = spread(event)
-            val dDist = if (gLastDist > 0f && dist > 0f) dist - gLastDist else 0f
-
-            when (gestureMode) {
-                1 -> {
-                    if (kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
-                        sparkN = (sparkN + dx * 0.004f).coerceIn(0f, 1.5f)
-                    } else {
-                        sizeBoost = (sizeBoost - dy * 0.006f).coerceIn(0.4f, 4.0f)
-                    }
-                    gMoved += kotlin.math.abs(dx) + kotlin.math.abs(dy)
-                }
-                2 -> {
-                    val dragMag = kotlin.math.abs(dx) + kotlin.math.abs(dy)
-                    if (kotlin.math.abs(dDist) > dragMag * 1.2f && gLastDist > 1f && dist > 1f) {
-                        camZoom = (camZoom * (gLastDist / dist)).coerceIn(0.4f, 3.0f)
-                    } else if (kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
-                        waveSpeed = (waveSpeed + dx * 0.004f).coerceIn(0.1f, 5.0f)
-                    } else {
-                        rotSpeed = (rotSpeed - dy * 0.005f).coerceIn(0f, 4.0f)
-                    }
-                    gMoved += dragMag
-                }
-                3 -> {
-                    autoWaveMs = (autoWaveMs - (dy * 30f).toLong()).coerceIn(0L, 20000L)
-                    gMoved += kotlin.math.abs(dy)
-                }
-            }
-
-            gLastX = x
-            gLastY = y
-            gLastDist = dist
-        }
-
-        private fun resetParams() {
-            sizeBoost = G_SIZE_BOOST
-            sparkN = G_SPARK_N
-            rotSpeed = 1f
-            waveSpeed = 1f
-            camZoom = 1f
-            autoWaveMs = G_AUTO_WAVE_MS
-        }
-
-        private fun avgX(e: MotionEvent): Float {
-            val skip = if (e.actionMasked == MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
-            var s = 0f
-            var n = 0
-            for (i in 0 until e.pointerCount) {
-                if (i == skip) continue
-                s += e.getX(i); n++
-            }
-            return if (n == 0) 0f else s / n
-        }
-
-        private fun avgY(e: MotionEvent): Float {
-            val skip = if (e.actionMasked == MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
-            var s = 0f
-            var n = 0
-            for (i in 0 until e.pointerCount) {
-                if (i == skip) continue
-                s += e.getY(i); n++
-            }
-            return if (n == 0) 0f else s / n
-        }
-
-        private fun spread(e: MotionEvent): Float {
-            val skip = if (e.actionMasked == MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
-            var i0 = -1
-            var i1 = -1
-            for (i in 0 until e.pointerCount) {
-                if (i == skip) continue
-                if (i0 < 0) i0 = i else if (i1 < 0) { i1 = i; break }
-            }
-            if (i0 < 0 || i1 < 0) return 0f
-            val dx = e.getX(i0) - e.getX(i1)
-            val dy = e.getY(i0) - e.getY(i1)
-            return kotlin.math.sqrt(dx * dx + dy * dy)
         }
 
         override fun onCommand(
@@ -841,6 +726,8 @@ class KaleidoWallpaperService : WallpaperService() {
 
                 Matrix.setIdentityM(mv, 0)
                 Matrix.translateM(mv, 0, 0f, 0f, -camZ * camZoom)
+                Matrix.rotateM(mv, 0, camYaw, 0f, 1f, 0f)
+                Matrix.rotateM(mv, 0, camPitch, 1f, 0f, 0f)
 
                 GLES20.glUseProgram(prog)
                 GLES20.glUniformMatrix4fv(locMV, 1, false, mv, 0)
