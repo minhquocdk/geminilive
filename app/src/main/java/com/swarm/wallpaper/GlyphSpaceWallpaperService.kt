@@ -376,8 +376,7 @@ void main() {
     float cx = sx / uSize.x * 2.0 - 1.0;
     float cy = 1.0 - sy / uSize.y * 2.0;
     gl_Position = vec4(cx, cy, 0.0, 1.0);
-    float sizeRef = minDim / 1440.0; 
-    gl_PointSize = max(8.0, baseSize * sizeMul * scale * sizeRef) * uDpr * sizePulse;
+    gl_PointSize = max(8.0, baseSize * sizeMul * scale) * uDpr * sizePulse;
 }
 """
 
