@@ -3,7 +3,6 @@ package com.swarm.wallpaper
 import android.app.WallpaperManager
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -397,35 +396,6 @@ void main() {
 }
 """
 
-private const val K_BG_VERT = """
-attribute vec2 aP; attribute vec2 aU; varying vec2 vU;
-void main(){ vU=aU; gl_Position=vec4(aP,0.0,1.0); }
-"""
-private const val K_BG_FRAG = """
-precision mediump float; varying vec2 vU; uniform sampler2D uBg;
-uniform vec2 uScr; uniform vec2 uImg;
-void main(){
-    // vU: (0,0) góc trên-trái, (1,1) góc dưới-phải của màn hình
-    float sA = uScr.x / uScr.y;
-    float iA = uImg.x / uImg.y;
-    vec2 uv = vU;
-    if (iA > sA) {
-        // Ảnh rộng hơn màn → letterbox trên/dưới, fit theo bề ngang
-        float f = sA / iA;                 // phần chiều cao màn mà ảnh chiếm
-        uv.y = (uv.y - (1.0 - f)) / f;     // neo ĐÁY: dồn khoảng trống lên trên
-    } else {
-        // Ảnh cao hơn màn → pillar trái/phải, fit theo chiều cao, căn giữa ngang
-        float f = iA / sA;                 // phần chiều rộng màn mà ảnh chiếm
-        uv.x = (uv.x - 0.5) / f + 0.5;
-    }
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);   // vùng trống ngoài ảnh → đen
-    } else {
-        gl_FragColor = texture2D(uBg, uv);
-    }
-}
-"""
-
 // ───────────────────────── WALLPAPER SERVICE ─────────────────────────
 class GlyphSpaceWallpaperService : WallpaperService() {
     override fun onCreateEngine(): Engine = KEngine()
@@ -446,11 +416,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
         private var prog = 0
         private var vbo = 0
         private var tex = 0
-        private var bgProg = 0
-        private var bgTex = 0
-        private var bgVbo = 0
-        private var bgW = 1f
-        private var bgH = 1f
 
         private var locA = -1
         private var locB = -1
@@ -708,7 +673,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             locSecond = GLES20.glGetUniformLocation(prog, "uSecond")
 
             buildAtlas()
-            initBg()
             val ids = IntArray(1)
             GLES20.glGenBuffers(1, ids, 0)
             vbo = ids[0]
@@ -750,53 +714,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
             bmp.recycle()
-        }
-
-        private fun initBg() {
-            val vs = compile(GLES20.GL_VERTEX_SHADER, K_BG_VERT)
-            val fs = compile(GLES20.GL_FRAGMENT_SHADER, K_BG_FRAG)
-            bgProg = GLES20.glCreateProgram()
-            GLES20.glAttachShader(bgProg, vs); GLES20.glAttachShader(bgProg, fs)
-            GLES20.glLinkProgram(bgProg)
-            GLES20.glDeleteShader(vs); GLES20.glDeleteShader(fs)
-
-            val q = floatArrayOf(-1f,-1f,0f,1f, 1f,-1f,1f,1f, -1f,1f,0f,0f, 1f,1f,1f,0f)
-            val buf = ByteBuffer.allocateDirect(q.size*4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-            buf.put(q).position(0)
-            val ids = IntArray(1); GLES20.glGenBuffers(1, ids, 0); bgVbo = ids[0]
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, bgVbo)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, q.size*4, buf, GLES20.GL_STATIC_DRAW)
-
-            try {
-                val bmp = assets.open("2.png").use { BitmapFactory.decodeStream(it) }
-                bgW = bmp.width.toFloat(); bgH = bmp.height.toFloat()
-                val t = IntArray(1); GLES20.glGenTextures(1, t, 0); bgTex = t[0]
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex)
-                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
-                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-                bmp.recycle()
-            } catch (_: Exception) {}
-        }
-
-        private fun drawBg() {
-            if (bgProg == 0 || bgTex == 0) return
-            GLES20.glUseProgram(bgProg)
-            GLES20.glUniform2f(GLES20.glGetUniformLocation(bgProg, "uScr"), w/dpr, h/dpr)
-            GLES20.glUniform2f(GLES20.glGetUniformLocation(bgProg, "uImg"), bgW, bgH)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTex)
-            GLES20.glUniform1i(GLES20.glGetUniformLocation(bgProg, "uBg"), 0)
-            val p = GLES20.glGetAttribLocation(bgProg, "aP")
-            val u = GLES20.glGetAttribLocation(bgProg, "aU")
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, bgVbo)
-            GLES20.glEnableVertexAttribArray(p)
-            GLES20.glVertexAttribPointer(p, 2, GLES20.GL_FLOAT, false, 16, 0)
-            GLES20.glEnableVertexAttribArray(u)
-            GLES20.glVertexAttribPointer(u, 2, GLES20.GL_FLOAT, false, 16, 8)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            GLES20.glDisableVertexAttribArray(p)
-            GLES20.glDisableVertexAttribArray(u)
         }
 
         private fun rebuildGlyphVbo() {
@@ -866,7 +783,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glViewport(0, 0, w, h)
                 GLES20.glClearColor(0f, 0f, 0f, 1f)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-                drawBg()
 
                 GLES20.glUseProgram(prog)
                 GLES20.glUniform1f(locTime, timeSec)
@@ -922,9 +838,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                         if (vbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(vbo), 0)
                         if (tex != 0) GLES20.glDeleteTextures(1, intArrayOf(tex), 0)
                         if (prog != 0) GLES20.glDeleteProgram(prog)
-                        if (bgVbo != 0) GLES20.glDeleteBuffers(1, intArrayOf(bgVbo), 0)
-                        if (bgTex != 0) GLES20.glDeleteTextures(1, intArrayOf(bgTex), 0)
-                        if (bgProg != 0) GLES20.glDeleteProgram(bgProg)
                     }
                     EGL14.eglMakeCurrent(
                         dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT
@@ -941,9 +854,6 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             prog = 0
             vbo = 0
             tex = 0
-            bgProg = 0
-            bgVbo = 0
-            bgTex = 0
             glReady = false
         }
     }
