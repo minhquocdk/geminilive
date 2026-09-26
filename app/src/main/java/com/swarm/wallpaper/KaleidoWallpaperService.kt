@@ -1006,12 +1006,21 @@ class KaleidoWallpaperService : WallpaperService() {
 
                     // quán tính orbit khi thả tay
                     if (!dragging) {
+                        // 1) tiếp tục xoay theo vận tốc đã có, giảm dần
                         orbitYaw += velYaw
                         orbitPitch = (orbitPitch + velPitch).coerceIn(-75f, 75f)
                         velYaw *= 0.92f
                         velPitch *= 0.92f
-                        if (abs(velYaw) < 0.01f) velYaw = 0f
-                        if (abs(velPitch) < 0.01f) velPitch = 0f
+                        if (abs(velYaw) < 0.05f) velYaw = 0f
+                        if (abs(velPitch) < 0.05f) velPitch = 0f
+
+                        // 2) sau khi quán tính tắt, tự động về 0
+                        if (velYaw == 0f && velPitch == 0f) {
+                            orbitYaw *= 0.94f
+                            orbitPitch *= 0.94f
+                            if (abs(orbitYaw) < 0.05f) orbitYaw = 0f
+                            if (abs(orbitPitch) < 0.05f) orbitPitch = 0f
+                        }
                     }
 
                     Matrix.setIdentityM(mv, 0)
