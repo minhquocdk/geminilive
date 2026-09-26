@@ -821,8 +821,8 @@ class KaleidoWallpaperService : WallpaperService() {
                     val dx = bx - ax; val dy = by - ay
                     val segLen = sqrt(dx*dx + dy*dy).coerceAtLeast(1e-4f)
                     val f = ((t - cum) / segLen).coerceIn(0f, 1f)
-                    x = ax + dx * f * G_R
-                    y = ay + dy * f * G_R
+                    x = ax + dx * f * G_R * 10
+                    y = ay + dy * f * G_R * 10
 
                     // jitter
                     val ja = Random.nextFloat() * (2f * PI).toFloat()
