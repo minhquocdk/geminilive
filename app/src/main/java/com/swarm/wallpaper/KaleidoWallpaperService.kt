@@ -615,6 +615,8 @@ class KaleidoWallpaperService : WallpaperService() {
         private var orbitYaw0 = 0f
         private var orbitPitch0 = 0f
         private var dragging = false
+        private var velYaw = 0f
+        private var velPitch = 0f
         // ── Touch: tap đổi màu + bắn sóng, kéo để di chuyển hover ──
         override fun onTouchEvent(event: MotionEvent) {
             when (event.actionMasked) {
