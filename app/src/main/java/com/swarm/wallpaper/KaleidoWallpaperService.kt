@@ -624,29 +624,38 @@ class KaleidoWallpaperService : WallpaperService() {
                     orbitYaw0 = orbitYaw
                     orbitPitch0 = orbitPitch
                     dragging = false
+                    velYaw = 0f
+                    velPitch = 0f
+                    hoverActive = false
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.x - downX
                     val dy = event.y - downY
-                    // ngưỡng ~10px để phân biệt tap và kéo
-                    if (dragging || dx * dx + dy * dy > 100f) {
-                        dragging = true
-                        orbitYaw   = orbitYaw0   + dx * 0.35f
+                    if (!dragging && dx * dx + dy * dy > 100f) dragging = true
+                    if (dragging) {
+                        val prevYaw = orbitYaw
+                        val prevPitch = orbitPitch
+                        orbitYaw = orbitYaw0 + dx * 0.35f
                         orbitPitch = (orbitPitch0 + dy * 0.35f).coerceIn(-75f, 75f)
-                    } else {
-                        updateHover(event.x, event.y)
+                        velYaw = orbitYaw - prevYaw
+                        velPitch = orbitPitch - prevPitch
                     }
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragging) {
                         val dt = SystemClock.uptimeMillis() - lastDownAt
                         val dx = event.x - downX; val dy = event.y - downY
-                        if (dt < 300L && sqrt(dx * dx + dy * dy) < 24f) triggerTap()
+                        if (dt < 300L && sqrt(dx * dx + dy * dy) < 24f) {
+                            triggerTap()
+                        }
                     }
                     hoverActive = false
                     dragging = false
                 }
-                MotionEvent.ACTION_CANCEL -> { hoverActive = false; dragging = false }
+                MotionEvent.ACTION_CANCEL -> {
+                    hoverActive = false
+                    dragging = false
+                }
             }
             super.onTouchEvent(event)
         }
@@ -987,17 +996,27 @@ class KaleidoWallpaperService : WallpaperService() {
 
                 if (scaleR > 0.001f) {
                     // parallax: dịch camera nhẹ theo độ nghiêng thiết bị
-                    val px = tiltX * 28f
+                                        val px = tiltX * 28f
                     val py = tiltY * 28f
-                    // nếu hover đang bật thì kéo thêm
-                    val hvx = if (hoverActive) hoverX * 0.18f else 0f
-                    val hvy = if (hoverActive) hoverY * 0.18f else 0f
+                    // hover chỉ áp khi KHÔNG kéo, tránh làm trôi tâm khi orbit
+                    val hvx = if (hoverActive && !dragging) hoverX * 0.18f else 0f
+                    val hvy = if (hoverActive && !dragging) hoverY * 0.18f else 0f
 
-                Matrix.setIdentityM(mv, 0)
-                Matrix.translateM(mv, 0, -px - hvx, -py - hvy, -camZ)
-                Matrix.rotateM(mv, 0, orbitYaw,   0f, 1f, 0f)   // yaw quanh trục Y
-                Matrix.rotateM(mv, 0, orbitPitch, 1f, 0f, 0f)   // pitch quanh trục X
-                Matrix.scaleM(mv, 0, scaleR, scaleR, scaleR)
+                    // quán tính orbit khi thả tay
+                    if (!dragging) {
+                        orbitYaw += velYaw
+                        orbitPitch = (orbitPitch + velPitch).coerceIn(-75f, 75f)
+                        velYaw *= 0.92f
+                        velPitch *= 0.92f
+                        if (abs(velYaw) < 0.01f) velYaw = 0f
+                        if (abs(velPitch) < 0.01f) velPitch = 0f
+                    }
+
+                    Matrix.setIdentityM(mv, 0)
+                    Matrix.translateM(mv, 0, -px - hvx, -py - hvy, -camZ)
+                    Matrix.rotateM(mv, 0, orbitYaw, 0f, 1f, 0f)
+                    Matrix.rotateM(mv, 0, orbitPitch, 1f, 0f, 0f)
+                    Matrix.scaleM(mv, 0, scaleR, scaleR, scaleR)
 
                     val sizeIn = 0.55f + 0.45f * ease
                     val hoverFlag = if (hoverActive) 1f else 0f
