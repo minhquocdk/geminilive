@@ -790,6 +790,10 @@ class KaleidoWallpaperService : WallpaperService() {
             progStruct = GLES20.glCreateProgram()
             GLES20.glAttachShader(progStruct, vs1)
             GLES20.glAttachShader(progStruct, fs1)
+            // Ép cố định location để không bao giờ trùng slot với progSpark
+            GLES20.glBindAttribLocation(progStruct, 0, "aP")
+            GLES20.glBindAttribLocation(progStruct, 1, "aX")
+            GLES20.glBindAttribLocation(progStruct, 2, "aSym")
             GLES20.glLinkProgram(progStruct)
             val st = IntArray(1)
             GLES20.glGetProgramiv(progStruct, GLES20.GL_LINK_STATUS, st, 0)
@@ -820,6 +824,11 @@ class KaleidoWallpaperService : WallpaperService() {
             progSpark = GLES20.glCreateProgram()
             GLES20.glAttachShader(progSpark, vs2)
             GLES20.glAttachShader(progSpark, fs2)
+            // Location khác hẳn dải 0-2 của progStruct
+            GLES20.glBindAttribLocation(progSpark, 4, "aP")
+            GLES20.glBindAttribLocation(progSpark, 5, "aCol")
+            GLES20.glBindAttribLocation(progSpark, 6, "aSA")
+            GLES20.glBindAttribLocation(progSpark, 7, "aSym")
             GLES20.glLinkProgram(progSpark)
             GLES20.glGetProgramiv(progSpark, GLES20.GL_LINK_STATUS, st, 0)
             if (st[0] == 0) return false
@@ -1128,9 +1137,13 @@ class KaleidoWallpaperService : WallpaperService() {
                     GLES20.glUniform1i(uTex, 0)
 
                     GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboStruct)
+                    val strideS = 9 * 4
                     GLES20.glEnableVertexAttribArray(aPs)
+                    GLES20.glVertexAttribPointer(aPs, 4, GLES20.GL_FLOAT, false, strideS, 0)
                     GLES20.glEnableVertexAttribArray(aXs)
+                    GLES20.glVertexAttribPointer(aXs, 4, GLES20.GL_FLOAT, false, strideS, 16)
                     GLES20.glEnableVertexAttribArray(aSyms)
+                    GLES20.glVertexAttribPointer(aSyms, 1, GLES20.GL_FLOAT, false, strideS, 32)
                     GLES20.glDrawArrays(GLES20.GL_POINTS, 0, drawParticles)
                     GLES20.glDisableVertexAttribArray(aPs)
                     GLES20.glDisableVertexAttribArray(aXs)
@@ -1151,10 +1164,15 @@ class KaleidoWallpaperService : WallpaperService() {
                         sparkBuf.put(sparkCPU, 0, activeSparks * 10)
                         sparkBuf.position(0)
                         GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, 0, activeSparks * 10 * 4, sparkBuf)
+                        val strideK = 10 * 4
                         GLES20.glEnableVertexAttribArray(aPk)
+                        GLES20.glVertexAttribPointer(aPk, 4, GLES20.GL_FLOAT, false, strideK, 0)
                         GLES20.glEnableVertexAttribArray(aColk)
+                        GLES20.glVertexAttribPointer(aColk, 3, GLES20.GL_FLOAT, false, strideK, 16)
                         GLES20.glEnableVertexAttribArray(aSAk)
+                        GLES20.glVertexAttribPointer(aSAk, 2, GLES20.GL_FLOAT, false, strideK, 28)
                         GLES20.glEnableVertexAttribArray(aSymk)
+                        GLES20.glVertexAttribPointer(aSymk, 1, GLES20.GL_FLOAT, false, strideK, 36)
                         GLES20.glDrawArrays(GLES20.GL_POINTS, 0, activeSparks)
                         GLES20.glDisableVertexAttribArray(aPk)
                         GLES20.glDisableVertexAttribArray(aColk)
