@@ -888,8 +888,8 @@ class KaleidoWallpaperService : WallpaperService() {
                 val o = i * 9
                 var x: Float; var y: Float
                 if (P.disc > 0f) {
-                    val a = Random.nextFloat() * (2f * PI).toFloat()
-                    val rr = sqrt(Random.nextFloat()) * P.disc * G_R
+                    val a = rnd.nextFloat() * (2f * PI).toFloat()
+                    val rr = sqrt(rnd.nextFloat()) * P.disc * G_R
                     x = cos(a) * rr; y = sin(a) * rr
                 } else {
                     val pd = getPolyData(P)
@@ -920,12 +920,12 @@ class KaleidoWallpaperService : WallpaperService() {
                     y = (ay + (by - ay) * f) * G_R
 
                     // jitter
-                    val ja = Random.nextFloat() * (2f * PI).toFloat()
-                    val jr = (Random.nextFloat() * 0.5f + Random.nextFloat() * 0.5f) * P.jitter * G_R
+                    val ja = rnd.nextFloat() * (2f * PI).toFloat()
+                    val jr = (rnd.nextFloat() * 0.5f + rnd.nextFloat() * 0.5f) * P.jitter * G_R
                     x += cos(ja) * jr; y += sin(ja) * jr
                 }
 
-                val z = P.z + (Random.nextFloat() - 0.5f) * P.zj
+                val z = P.z + (rnd.nextFloat() - 0.5f) * P.zj
                 val rad = sqrt(x * x + y * y)
                 val mix = Math.pow((1f - rad / G_R).coerceAtLeast(0f).toDouble(), 1.5).toFloat()
 
@@ -935,9 +935,9 @@ class KaleidoWallpaperService : WallpaperService() {
                 baseP[o + 3] = P.layer.toFloat()
                 baseP[o + 4] = rad
                 baseP[o + 5] = mix
-                baseP[o + 6] = P.size * (0.70f + Random.nextFloat() * 0.60f)
-                baseP[o + 7] = P.alpha * (0.65f + Random.nextFloat() * 0.70f)
-                baseP[o + 8] = Random.nextInt(symCount).toFloat()
+                baseP[o + 6] = P.size * (0.70f + rnd.nextFloat() * 0.60f)
+                baseP[o + 7] = P.alpha * (0.65f + rnd.nextFloat() * 0.70f)
+                baseP[o + 8] = rnd.nextInt(symCount).toFloat()
             }
 
             // nạp lên VBO
