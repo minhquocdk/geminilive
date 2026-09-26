@@ -498,6 +498,8 @@ class KaleidoWallpaperService : WallpaperService() {
         private var activeSparks = 2000
         // Layout 10 float / spark: x,y,z,pad, r,g,b, size,alpha,sym
         private val sparkCPU = FloatArray(G_SPARKS * 10)
+        private val sparkByteBuffer = ByteBuffer.allocateDirect(G_SPARKS * 10 * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
 
         private val baseColorArr = FloatArray(3)
         private val coreColorArr = FloatArray(3)
