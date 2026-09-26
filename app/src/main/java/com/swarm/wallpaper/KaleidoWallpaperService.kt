@@ -38,7 +38,7 @@ import kotlin.math.sqrt
 import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val G_PARTICLES = 18000     // số hạt dựng hình
+private const val G_PARTICLES = 25000     // số hạt dựng hình
 private const val G_SPARKS = 3000         // pool tàn lửa
 private const val G_FPS = 60              // fps bình thường
 private const val G_FPS_SAVER = 20        // fps khi bật Tiết kiệm pin
