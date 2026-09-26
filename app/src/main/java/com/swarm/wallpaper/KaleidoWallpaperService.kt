@@ -463,9 +463,7 @@ class KaleidoWallpaperService : WallpaperService() {
         private val angles = FloatArray(4)
         private val cosSin = FloatArray(8)
 
-        // parallax
-        private var tiltX = 0f
-        private var tiltY = 0f
+        // lắc đổi phép
         private var lastShakeAt = 0L
         private val grav = FloatArray(3)
         private var hasGrav = false
@@ -586,10 +584,6 @@ class KaleidoWallpaperService : WallpaperService() {
                 grav[1] = grav[1] * a + y * (1 - a)
                 grav[2] = grav[2] * a + z * (1 - a)
             }
-            // parallax nhẹ theo độ nghiêng
-            tiltX = (-grav[0] / 9.81f).coerceIn(-1f, 1f)
-            tiltY = ( grav[1] / 9.81f).coerceIn(-1f, 1f)
-
             // lắc = bỏ trọng lực ra, tính magnitude phần động
             val dx = x - grav[0]
             val dy = y - grav[1]
@@ -1000,13 +994,10 @@ class KaleidoWallpaperService : WallpaperService() {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
                 if (scaleR > 0.001f) {
-                    // parallax: dịch camera nhẹ theo độ nghiêng thiết bị
-                                        val px = tiltX * 28f
-                                        val py = tiltY * 28f
-                                        // hover parallax chỉ áp khi KHÔNG kéo — tránh làm trôi tâm khi orbit,
-                                        // nhưng điểm sáng (uHover) vẫn bật để ngón tay rực lên khi chạm
-                                        val hvx = if (hoverActive && !dragging) hoverX * 0.18f else 0f
-                                        val hvy = if (hoverActive && !dragging) hoverY * 0.18f else 0f
+                    // hover parallax chỉ áp khi KHÔNG kéo — tránh làm trôi tâm khi orbit,
+                    // nhưng điểm sáng (uHover) vẫn bật để ngón tay rực lên khi chạm
+                    val hvx = if (hoverActive && !dragging) hoverX * 0.18f else 0f
+                    val hvy = if (hoverActive && !dragging) hoverY * 0.18f else 0f
 
                     // quán tính orbit khi thả tay
                     if (!dragging) {
@@ -1028,7 +1019,7 @@ class KaleidoWallpaperService : WallpaperService() {
                     }
 
                     Matrix.setIdentityM(mv, 0)
-                    Matrix.translateM(mv, 0, -px - hvx, -py - hvy, -camZ)
+                    Matrix.translateM(mv, 0, -hvx, -hvy, -camZ)
                     Matrix.rotateM(mv, 0, orbitYaw, 0f, 1f, 0f)
                     Matrix.rotateM(mv, 0, orbitPitch, 1f, 0f, 0f)
                     Matrix.scaleM(mv, 0, scaleR, scaleR, scaleR)
