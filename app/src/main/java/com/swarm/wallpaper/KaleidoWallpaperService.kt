@@ -628,7 +628,8 @@ class KaleidoWallpaperService : WallpaperService() {
                     dragging = false
                     velYaw = 0f
                     velPitch = 0f
-                    hoverActive = false
+                    // bật hover ngay khi chạm để ngón tay sáng lên
+                    updateHover(event.x, event.y)
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.x - downX
@@ -642,6 +643,8 @@ class KaleidoWallpaperService : WallpaperService() {
                         velYaw = orbitYaw - prevYaw
                         velPitch = orbitPitch - prevPitch
                     }
+                    // hover bám theo ngón tay kể cả khi đang xoay
+                    updateHover(event.x, event.y)
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragging) {
@@ -999,10 +1002,11 @@ class KaleidoWallpaperService : WallpaperService() {
                 if (scaleR > 0.001f) {
                     // parallax: dịch camera nhẹ theo độ nghiêng thiết bị
                                         val px = tiltX * 28f
-                    val py = tiltY * 28f
-                    // hover chỉ áp khi KHÔNG kéo, tránh làm trôi tâm khi orbit
-                    val hvx = if (hoverActive && !dragging) hoverX * 0.18f else 0f
-                    val hvy = if (hoverActive && !dragging) hoverY * 0.18f else 0f
+                                        val py = tiltY * 28f
+                                        // hover parallax chỉ áp khi KHÔNG kéo — tránh làm trôi tâm khi orbit,
+                                        // nhưng điểm sáng (uHover) vẫn bật để ngón tay rực lên khi chạm
+                                        val hvx = if (hoverActive && !dragging) hoverX * 0.18f else 0f
+                                        val hvy = if (hoverActive && !dragging) hoverY * 0.18f else 0f
 
                     // quán tính orbit khi thả tay
                     if (!dragging) {
