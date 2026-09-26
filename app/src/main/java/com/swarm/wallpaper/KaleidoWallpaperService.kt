@@ -851,10 +851,15 @@ class KaleidoWallpaperService : WallpaperService() {
 
         private fun setupSparkAttribs() {
             if (vboSpark == 0) {
-                val ids = IntArray(1); GLES20.glGenBuffers(1, ids, 0); vboSpark = ids[0]
-            }
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboSpark)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_SPARKS * 10 * 4, null, GLES20.GL_DYNAMIC_DRAW)
+                            val ids = IntArray(1); GLES20.glGenBuffers(1, ids, 0); vboSpark = ids[0]
+                            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboSpark)
+                            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_SPARKS * 10 * 4, null, GLES20.GL_DYNAMIC_DRAW)
+                        }
+                        sparkByteBuffer.position(0)
+                        sparkByteBuffer.put(sparkCPU, 0, activeSparks * 10)
+                        sparkByteBuffer.position(0)
+                        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboSpark)
+                        GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, 0, activeSparks * 10 * 4, sparkByteBuffer)
             val sStride = 10 * 4
             GLES20.glEnableVertexAttribArray(aPk)
             GLES20.glVertexAttribPointer(aPk, 4, GLES20.GL_FLOAT, false, sStride, 0)
