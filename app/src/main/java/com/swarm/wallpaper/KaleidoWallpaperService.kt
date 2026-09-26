@@ -25,20 +25,22 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.SystemClock
 import android.service.wallpaper.WallpaperService
+import android.util.Log
+import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Random
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
-import kotlin.random.Random
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val G_PARTICLES = 25000     // số hạt dựng hình
+private const val G_PARTICLES = 18000     // số hạt dựng hình
 private const val G_SPARKS = 3000         // pool tàn lửa
 private const val G_FPS = 60              // fps bình thường
 private const val G_FPS_SAVER = 20        // fps khi bật Tiết kiệm pin
@@ -81,6 +83,13 @@ private class SpellDef(
     val sparkSize: Float,
     val sparkZ: Float,
     val shapes: List<ShapeDef>
+)
+
+private class PolyData(
+    val polys: List<FloatArray>,
+    val cumLens: List<FloatArray>,
+    val totalLen: Float,
+    val segCounts: IntArray
 )
 
 // ───────────────────────── POLYLINE HELPERS ─────────────────────────
@@ -478,7 +487,6 @@ class KaleidoWallpaperService : WallpaperService() {
 
         // hạt dựng hình
         private val baseP = FloatArray(G_PARTICLES * 9)   // x,y,z,layer, radius,mix,size,alpha, sym
-        private val dynP = FloatArray(G_PARTICLES * 4)    // cos-sin applied rotation result + reveal (unused CPU now)
         // tàn lửa
         private val sparkBase = FloatArray(G_SPARKS * 9)  // x,y,z,_,r,g,b,size,alpha, sym (packed differently)
         private val spAngle = FloatArray(G_SPARKS)
@@ -494,14 +502,28 @@ class KaleidoWallpaperService : WallpaperService() {
         private val baseColorArr = FloatArray(3)
         private val coreColorArr = FloatArray(3)
 
-        private val loop = object : Runnable {
-            override fun run() {
-                val t0 = SystemClock.uptimeMillis()
-                drawFrame(t0)
-                if (shown) {
-                    val fps = if (pm.isPowerSaveMode) G_FPS_SAVER else G_FPS
-                    handler.postDelayed(this, max(1L, 1000L / fps - (SystemClock.uptimeMillis() - t0)))
+        private var drawParticles = G_PARTICLES
+        private val polyDataCache = HashMap<ShapeDef, PolyData>()
+        private val rnd = Random()
+        private val sparkBuf = ByteBuffer.allocateDirect(G_SPARKS * 10 * 4)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        private var frameErrCount = 0
+
+        private val choreographer = Choreographer.getInstance()
+        private var lastFrameTime = 0L
+        private val frameCallback = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (!shown) return
+                val now = SystemClock.uptimeMillis()
+                val fps = if (pm.isPowerSaveMode) G_FPS_SAVER else G_FPS
+                val interval = 1000L / fps
+                if (now - lastFrameTime < interval) {
+                    choreographer.postFrameCallback(this)
+                    return
                 }
+                lastFrameTime = now
+                drawFrame(now)
+                choreographer.postFrameCallback(this)
             }
         }
 
@@ -515,6 +537,33 @@ class KaleidoWallpaperService : WallpaperService() {
             presetIndex = i
             hexToRgb(PRESETS[i].hex, baseColorArr)
             hexToRgb(PRESETS[i].core, coreColorArr)
+        }
+
+        private fun getPolyData(P: ShapeDef): PolyData {
+            polyDataCache[P]?.let { return it }
+            val polys = P.polys
+            val cumLens = ArrayList<FloatArray>(polys.size)
+            var total = 0f
+            val segCounts = IntArray(polys.size)
+            for ((idx, poly) in polys.withIndex()) {
+                val n = poly.size / 2
+                val seg = if (P.open) n - 1 else n
+                segCounts[idx] = seg
+                val cum = FloatArray(seg + 1)
+                var acc = 0f
+                for (k in 0 until seg) {
+                    val ax = poly[k*2]; val ay = poly[k*2+1]
+                    val bx = poly[((k+1)%n)*2]; val by = poly[((k+1)%n)*2+1]
+                    val dx = bx-ax; val dy = by-ay
+                    acc += sqrt(dx*dx+dy*dy)
+                    cum[k+1] = acc
+                }
+                cumLens.add(cum)
+                total += acc
+            }
+            val data = PolyData(polys, cumLens, total, segCounts)
+            polyDataCache[P] = data
+            return data
         }
 
         override fun onCreate(surfaceHolder: SurfaceHolder) {
@@ -533,6 +582,16 @@ class KaleidoWallpaperService : WallpaperService() {
             super.onSurfaceChanged(holder, format, width, height)
             w = width
             h = height
+            val area = w * h
+            val quality = when {
+                area > 2_500_000 -> 1.0f
+                area > 1_500_000 -> 0.8f
+                area > 1_000_000 -> 0.65f
+                else -> 0.5f
+            }
+            drawParticles = (G_PARTICLES * quality).toInt().coerceAtLeast(4000)
+            activeSparks = (2000 * quality).toInt().coerceAtLeast(500)
+            if (glReady) rebuildStructure(SPELLS[spellIndex].shapes)
             val aspect = w.toFloat() / h.toFloat()
             // vừa khít chiều ngang màn hình (kể cả dọc)
             val halfNeeded = G_R * 1.30f
@@ -545,25 +604,26 @@ class KaleidoWallpaperService : WallpaperService() {
 
         override fun onVisibilityChanged(visible: Boolean) {
             shown = visible
-            handler.removeCallbacks(loop)
+            choreographer.removeFrameCallback(frameCallback)
             if (visible) {
                 val now = SystemClock.uptimeMillis()
                 startAt = now
                 lastT = now
-                handler.post(loop)
+                lastFrameTime = 0L
+                choreographer.postFrameCallback(frameCallback)
             }
         }
 
         override fun onSurfaceDestroyed(holder: SurfaceHolder) {
             shown = false
-            handler.removeCallbacks(loop)
+            choreographer.removeFrameCallback(frameCallback)
             releaseGL()
             super.onSurfaceDestroyed(holder)
         }
 
         override fun onDestroy() {
             shown = false
-            handler.removeCallbacks(loop)
+            choreographer.removeFrameCallback(frameCallback)
             sensorMgr.unregisterListener(this)
             releaseGL()
             super.onDestroy()
@@ -775,6 +835,41 @@ class KaleidoWallpaperService : WallpaperService() {
             return true
         }
 
+        private fun setupStructAttribs() {
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboStruct)
+            val stride = 9 * 4
+            GLES20.glEnableVertexAttribArray(aPs)
+            GLES20.glVertexAttribPointer(aPs, 4, GLES20.GL_FLOAT, false, stride, 0)
+            GLES20.glEnableVertexAttribArray(aXs)
+            GLES20.glVertexAttribPointer(aXs, 4, GLES20.GL_FLOAT, false, stride, 16)
+            GLES20.glEnableVertexAttribArray(aSyms)
+            GLES20.glVertexAttribPointer(aSyms, 1, GLES20.GL_FLOAT, false, stride, 32)
+            GLES20.glDisableVertexAttribArray(aPs)
+            GLES20.glDisableVertexAttribArray(aXs)
+            GLES20.glDisableVertexAttribArray(aSyms)
+        }
+
+        private fun setupSparkAttribs() {
+            if (vboSpark == 0) {
+                val ids = IntArray(1); GLES20.glGenBuffers(1, ids, 0); vboSpark = ids[0]
+            }
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboSpark)
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_SPARKS * 10 * 4, null, GLES20.GL_DYNAMIC_DRAW)
+            val sStride = 10 * 4
+            GLES20.glEnableVertexAttribArray(aPk)
+            GLES20.glVertexAttribPointer(aPk, 4, GLES20.GL_FLOAT, false, sStride, 0)
+            GLES20.glEnableVertexAttribArray(aColk)
+            GLES20.glVertexAttribPointer(aColk, 3, GLES20.GL_FLOAT, false, sStride, 16)
+            GLES20.glEnableVertexAttribArray(aSAk)
+            GLES20.glVertexAttribPointer(aSAk, 2, GLES20.GL_FLOAT, false, sStride, 28)
+            GLES20.glEnableVertexAttribArray(aSymk)
+            GLES20.glVertexAttribPointer(aSymk, 1, GLES20.GL_FLOAT, false, sStride, 36)
+            GLES20.glDisableVertexAttribArray(aPk)
+            GLES20.glDisableVertexAttribArray(aColk)
+            GLES20.glDisableVertexAttribArray(aSAk)
+            GLES20.glDisableVertexAttribArray(aSymk)
+        }
+
         private fun rebuildStructure(shapes: List<ShapeDef>) {
             val symCount = glyphCount
             // tổng trọng số
@@ -788,8 +883,8 @@ class KaleidoWallpaperService : WallpaperService() {
             }
             val slotCount = slots.size
 
-            for (i in 0 until G_PARTICLES) {
-                val P = shapes[slots[Random.nextInt(slotCount)]]
+            for (i in 0 until drawParticles) {
+                val P = shapes[slots[rnd.nextInt(slotCount)]]
                 val o = i * 9
                 var x: Float; var y: Float
                 if (P.disc > 0f) {
@@ -797,58 +892,32 @@ class KaleidoWallpaperService : WallpaperService() {
                     val rr = sqrt(Random.nextFloat()) * P.disc * G_R
                     x = cos(a) * rr; y = sin(a) * rr
                 } else {
-                    // chọn polyline theo độ dài
-                    var total = 0f
-                    for (poly in P.polys) {
-                        val n = poly.size / 2
-                        val seg = if (P.open) n - 1 else n
-                        var len = 0f
-                        for (k in 0 until seg) {
-                            val ax = poly[k*2]; val ay = poly[k*2+1]
-                            val bx = poly[((k+1) % n)*2]; val by = poly[((k+1) % n)*2+1]
-                            val dx = bx - ax; val dy = by - ay
-                            len += sqrt(dx*dx + dy*dy)
-                        }
-                        total += len
-                    }
-                    var t = Random.nextFloat() * total
-                    var chosen: FloatArray = P.polys[0]
-                    var chosenLen = 0f
-                    for (poly in P.polys) {
-                        val n = poly.size / 2
-                        val seg = if (P.open) n - 1 else n
-                        var len = 0f
-                        for (k in 0 until seg) {
-                            val ax = poly[k*2]; val ay = poly[k*2+1]
-                            val bx = poly[((k+1) % n)*2]; val by = poly[((k+1) % n)*2+1]
-                            val dx = bx - ax; val dy = by - ay
-                            len += sqrt(dx*dx + dy*dy)
-                        }
-                        if (t <= len) { chosen = poly; chosenLen = len; break }
+                    val pd = getPolyData(P)
+                    var t = rnd.nextFloat() * pd.totalLen
+                    var chosenIdx = 0
+                    for (idx in pd.polys.indices) {
+                        val cum = pd.cumLens[idx]
+                        val len = cum[cum.size - 1]
+                        if (t <= len) { chosenIdx = idx; break }
                         t -= len
                     }
-                    // tìm đoạn
-                    val n = chosen.size / 2
-                    val seg = if (P.open) n - 1 else n
-                    var cum = 0f
-                    var lo = 0
-                    var acc = 0f
-                    for (k in 0 until seg) {
-                        val ax = chosen[k*2]; val ay = chosen[k*2+1]
-                        val bx = chosen[((k+1) % n)*2]; val by = chosen[((k+1) % n)*2+1]
-                        val dx = bx - ax; val dy = by - ay
-                        val segLen = sqrt(dx*dx + dy*dy)
-                        if (t <= acc + segLen || k == seg - 1) { lo = k; cum = acc; break }
-                        acc += segLen
+                    val chosen = pd.polys[chosenIdx]
+                    val cum = pd.cumLens[chosenIdx]
+                    var k = 0
+                    var low = 0; var high = cum.size - 2
+                    while (low <= high) {
+                        val mid = (low + high) / 2
+                        if (cum[mid] <= t) { k = mid; low = mid + 1 } else high = mid - 1
                     }
-                    val ax = chosen[lo*2]; val ay = chosen[lo*2+1]
-                    val bxi = ((lo + 1) % n) * 2
-                    val bx = chosen[bxi]; val by = chosen[bxi+1]
-                    val dx = bx - ax; val dy = by - ay
-                    val segLen = sqrt(dx*dx + dy*dy).coerceAtLeast(1e-4f)
-                    val f = ((t - cum) / segLen).coerceIn(0f, 1f)
-                    x = (ax + dx * f) * G_R
-                    y = (ay + dy * f) * G_R
+                    val segStart = cum[k]
+                    val segLen = (cum[k + 1] - segStart).coerceAtLeast(1e-4f)
+                    val f = ((t - segStart) / segLen).coerceIn(0f, 1f)
+                    val n = chosen.size / 2
+                    val ax = chosen[k * 2]; val ay = chosen[k * 2 + 1]
+                    val bxi = ((k + 1) % n) * 2
+                    val bx = chosen[bxi]; val by = chosen[bxi + 1]
+                    x = (ax + (bx - ax) * f) * G_R
+                    y = (ay + (by - ay) * f) * G_R
 
                     // jitter
                     val ja = Random.nextFloat() * (2f * PI).toFloat()
@@ -872,26 +941,28 @@ class KaleidoWallpaperService : WallpaperService() {
             }
 
             // nạp lên VBO
-            val buf = ByteBuffer.allocateDirect(G_PARTICLES * 9 * 4)
+            val buf = ByteBuffer.allocateDirect(drawParticles * 9 * 4)
                 .order(ByteOrder.nativeOrder()).asFloatBuffer()
-            buf.put(baseP); buf.position(0)
+            buf.put(baseP, 0, drawParticles * 9)
+            buf.position(0)
             if (vboStruct == 0) {
                 val ids = IntArray(1); GLES20.glGenBuffers(1, ids, 0); vboStruct = ids[0]
             }
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboStruct)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_PARTICLES * 9 * 4, buf, GLES20.GL_STATIC_DRAW)
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, drawParticles * 9 * 4, buf, GLES20.GL_STATIC_DRAW)
+            setupStructAttribs()
         }
 
         private fun respawnAllSparks(warm: Boolean) {
             val sp = SPELLS[spellIndex]
             for (i in 0 until G_SPARKS) {
-                spAngle[i] = Random.nextFloat() * (2f * PI).toFloat()
-                spLife[i]  = if (warm) Random.nextFloat() else 0f
-                spRate[i]  = sp.sparkRateLo + Random.nextFloat() * (sp.sparkRateHi - sp.sparkRateLo)
-                spSpin[i]  = (Random.nextFloat() - 0.5f) * sp.sparkSpin
-                spZ[i]     = (Random.nextFloat() - 0.5f) * sp.sparkZ
-                spBaseSize[i] = 2.0f + Random.nextFloat() * 4.5f
-                sparkCPU[i * 10 + 9] = Random.nextInt(glyphCount.coerceAtLeast(1)).toFloat()
+                spAngle[i] = rnd.nextFloat() * (2f * PI).toFloat()
+                spLife[i]  = if (warm) rnd.nextFloat() else 0f
+                spRate[i]  = sp.sparkRateLo + rnd.nextFloat() * (sp.sparkRateHi - sp.sparkRateLo)
+                spSpin[i]  = (rnd.nextFloat() - 0.5f) * sp.sparkSpin
+                spZ[i]     = (rnd.nextFloat() - 0.5f) * sp.sparkZ
+                spBaseSize[i] = 2.0f + rnd.nextFloat() * 4.5f
+                sparkCPU[i * 10 + 9] = rnd.nextInt(glyphCount.coerceAtLeast(1)).toFloat()
             }
         }
 
@@ -925,8 +996,7 @@ class KaleidoWallpaperService : WallpaperService() {
             tex = ids[0]
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, tex)
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
-            GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
@@ -950,7 +1020,7 @@ class KaleidoWallpaperService : WallpaperService() {
                     if (ctx != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(dpy, ctx)
                 }
             } catch (e: Exception) {
-                // bỏ qua
+                Log.e("KaleidoWallpaper", "releaseGL error", e)
             }
             surf = EGL14.EGL_NO_SURFACE
             ctx = EGL14.EGL_NO_CONTEXT
@@ -1051,14 +1121,10 @@ class KaleidoWallpaperService : WallpaperService() {
                     GLES20.glUniform1i(uTex, 0)
 
                     GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboStruct)
-                    val stride = 9 * 4
                     GLES20.glEnableVertexAttribArray(aPs)
-                    GLES20.glVertexAttribPointer(aPs, 4, GLES20.GL_FLOAT, false, stride, 0)
                     GLES20.glEnableVertexAttribArray(aXs)
-                    GLES20.glVertexAttribPointer(aXs, 4, GLES20.GL_FLOAT, false, stride, 16)
                     GLES20.glEnableVertexAttribArray(aSyms)
-                    GLES20.glVertexAttribPointer(aSyms, 1, GLES20.GL_FLOAT, false, stride, 32)
-                    GLES20.glDrawArrays(GLES20.GL_POINTS, 0, G_PARTICLES)
+                    GLES20.glDrawArrays(GLES20.GL_POINTS, 0, drawParticles)
                     GLES20.glDisableVertexAttribArray(aPs)
                     GLES20.glDisableVertexAttribArray(aXs)
                     GLES20.glDisableVertexAttribArray(aSyms)
@@ -1072,24 +1138,16 @@ class KaleidoWallpaperService : WallpaperService() {
                         GLES20.glUniform1f(uPRk, pixelRatio)
                         GLES20.glUniform1f(uSymCountK, glyphCount.toFloat())
 
-                        if (vboSpark == 0) {
-                            val ids = IntArray(1); GLES20.glGenBuffers(1, ids, 0); vboSpark = ids[0]
-                        }
-                        val sBuf = ByteBuffer.allocateDirect(G_SPARKS * 10 * 4)
-                            .order(ByteOrder.nativeOrder()).asFloatBuffer()
-                        sBuf.put(sparkCPU); sBuf.position(0)
+                        if (vboSpark == 0) setupSparkAttribs()
                         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboSpark)
-                        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_SPARKS * 10 * 4, sBuf, GLES20.GL_DYNAMIC_DRAW)
-
-                        val sStride = 10 * 4
+                        sparkBuf.clear()
+                        sparkBuf.put(sparkCPU, 0, activeSparks * 10)
+                        sparkBuf.position(0)
+                        GLES20.glBufferSubData(GLES20.GL_ARRAY_BUFFER, 0, activeSparks * 10 * 4, sparkBuf)
                         GLES20.glEnableVertexAttribArray(aPk)
-                        GLES20.glVertexAttribPointer(aPk, 4, GLES20.GL_FLOAT, false, sStride, 0)
                         GLES20.glEnableVertexAttribArray(aColk)
-                        GLES20.glVertexAttribPointer(aColk, 3, GLES20.GL_FLOAT, false, sStride, 16)
                         GLES20.glEnableVertexAttribArray(aSAk)
-                        GLES20.glVertexAttribPointer(aSAk, 2, GLES20.GL_FLOAT, false, sStride, 28)
                         GLES20.glEnableVertexAttribArray(aSymk)
-                        GLES20.glVertexAttribPointer(aSymk, 1, GLES20.GL_FLOAT, false, sStride, 36)
                         GLES20.glDrawArrays(GLES20.GL_POINTS, 0, activeSparks)
                         GLES20.glDisableVertexAttribArray(aPk)
                         GLES20.glDisableVertexAttribArray(aColk)
@@ -1102,7 +1160,8 @@ class KaleidoWallpaperService : WallpaperService() {
 
                 EGL14.eglSwapBuffers(dpy, surf)
             } catch (e: Exception) {
-                // bỏ qua khung lỗi
+                frameErrCount++
+                if (frameErrCount % 60 == 1) Log.e("KaleidoWallpaper", "drawFrame error", e)
             }
         }
 
@@ -1121,11 +1180,11 @@ class KaleidoWallpaperService : WallpaperService() {
             for (i in 0 until activeSparks) {
                 spLife[i] += spRate[i] * dt
                 if (spLife[i] >= 1f) {
-                    spAngle[i] = Random.nextFloat() * (2f * PI).toFloat()
+                    spAngle[i] = rnd.nextFloat() * (2f * PI).toFloat()
                     spLife[i] = 0f
-                    spRate[i] = sp.sparkRateLo + Random.nextFloat() * (sp.sparkRateHi - sp.sparkRateLo)
-                    spSpin[i] = (Random.nextFloat() - 0.5f) * sp.sparkSpin
-                    spZ[i] = (Random.nextFloat() - 0.5f) * sp.sparkZ
+                    spRate[i] = sp.sparkRateLo + rnd.nextFloat() * (sp.sparkRateHi - sp.sparkRateLo)
+                    spSpin[i] = (rnd.nextFloat() - 0.5f) * sp.sparkSpin
+                    spZ[i] = (rnd.nextFloat() - 0.5f) * sp.sparkZ
                 }
                 spAngle[i] += spSpin[i] * dt
 
