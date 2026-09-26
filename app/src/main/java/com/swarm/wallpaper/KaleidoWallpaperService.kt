@@ -387,7 +387,7 @@ void main() {
     uv.x = (uv.x + vSym) / uSymCount;
     vec4 t = texture2D(uTex, uv);
     if (t.a < 0.12) discard;
-    gl_FragColor = vec4(vColor * t.rgb, t.a * vAlpha);
+    gl_FragColor = vec4(vColor, t.a * vAlpha);
 }
 """
 
