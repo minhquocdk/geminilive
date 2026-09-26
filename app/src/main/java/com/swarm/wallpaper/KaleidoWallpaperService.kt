@@ -609,26 +609,44 @@ class KaleidoWallpaperService : WallpaperService() {
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-
+        // orbit
+        private var orbitYaw = 0f
+        private var orbitPitch = 0f
+        private var orbitYaw0 = 0f
+        private var orbitPitch0 = 0f
+        private var dragging = false
         // ── Touch: tap đổi màu + bắn sóng, kéo để di chuyển hover ──
         override fun onTouchEvent(event: MotionEvent) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x; downY = event.y
                     lastDownAt = SystemClock.uptimeMillis()
-                    updateHover(event.x, event.y)
+                    orbitYaw0 = orbitYaw
+                    orbitPitch0 = orbitPitch
+                    dragging = false
                 }
-                MotionEvent.ACTION_MOVE -> updateHover(event.x, event.y)
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.x - downX
+                    val dy = event.y - downY
+                    // ngưỡng ~10px để phân biệt tap và kéo
+                    if (dragging || dx * dx + dy * dy > 100f) {
+                        dragging = true
+                        orbitYaw   = orbitYaw0   + dx * 0.35f
+                        orbitPitch = (orbitPitch0 + dy * 0.35f).coerceIn(-75f, 75f)
+                    } else {
+                        updateHover(event.x, event.y)
+                    }
+                }
                 MotionEvent.ACTION_UP -> {
-                    val dt = SystemClock.uptimeMillis() - lastDownAt
-                    val dx = event.x - downX; val dy = event.y - downY
-                    val moved = sqrt(dx * dx + dy * dy)
-                    if (dt < 300L && moved < 24f) {
-                        triggerTap()
+                    if (!dragging) {
+                        val dt = SystemClock.uptimeMillis() - lastDownAt
+                        val dx = event.x - downX; val dy = event.y - downY
+                        if (dt < 300L && sqrt(dx * dx + dy * dy) < 24f) triggerTap()
                     }
                     hoverActive = false
+                    dragging = false
                 }
-                MotionEvent.ACTION_CANCEL -> hoverActive = false
+                MotionEvent.ACTION_CANCEL -> { hoverActive = false; dragging = false }
             }
             super.onTouchEvent(event)
         }
@@ -975,9 +993,11 @@ class KaleidoWallpaperService : WallpaperService() {
                     val hvx = if (hoverActive) hoverX * 0.18f else 0f
                     val hvy = if (hoverActive) hoverY * 0.18f else 0f
 
-                    Matrix.setIdentityM(mv, 0)
-                    Matrix.translateM(mv, 0, -px - hvx, -py - hvy, -camZ)
-                    Matrix.scaleM(mv, 0, scaleR, scaleR, scaleR)
+                Matrix.setIdentityM(mv, 0)
+                Matrix.translateM(mv, 0, -px - hvx, -py - hvy, -camZ)
+                Matrix.rotateM(mv, 0, orbitYaw,   0f, 1f, 0f)   // yaw quanh trục Y
+                Matrix.rotateM(mv, 0, orbitPitch, 1f, 0f, 0f)   // pitch quanh trục X
+                Matrix.scaleM(mv, 0, scaleR, scaleR, scaleR)
 
                     val sizeIn = 0.55f + 0.45f * ease
                     val hoverFlag = if (hoverActive) 1f else 0f
