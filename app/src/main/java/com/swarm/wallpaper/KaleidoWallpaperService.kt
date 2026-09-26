@@ -628,23 +628,22 @@ class KaleidoWallpaperService : WallpaperService() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.x - downX
                     val dy = event.y - downY
-                    if (!dragging && dx * dx + dy * dy > 100f) dragging = true
-                    if (dragging) {
-                        val prevYaw = orbitYaw
-                        val prevPitch = orbitPitch
-                        orbitYaw = orbitYaw0 + dx * 0.35f
-                        orbitPitch = (orbitPitch0 + dy * 0.35f).coerceIn(-75f, 75f)
-                        velYaw = orbitYaw - prevYaw
-                        velPitch = orbitPitch - prevPitch
-                    }
-                    // hover bám theo ngón tay kể cả khi đang xoay
+                    // bắt đầu xoay NGAY, không ngưỡng — giống OrbitControls
+                    if (!dragging) dragging = true
+                    val prevYaw = orbitYaw
+                    val prevPitch = orbitPitch
+                    orbitYaw = orbitYaw0 + dx * 0.35f
+                    orbitPitch = (orbitPitch0 + dy * 0.35f).coerceIn(-75f, 75f)
+                    velYaw = orbitYaw - prevYaw
+                    velPitch = orbitPitch - prevPitch
+                    // hover vẫn cập nhật để ngón tay rực sáng (chỉ ảnh hưởng shader, không đẩy camera)
                     updateHover(event.x, event.y)
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!dragging) {
                         val dt = SystemClock.uptimeMillis() - lastDownAt
                         val dx = event.x - downX; val dy = event.y - downY
-                        if (dt < 300L && sqrt(dx * dx + dy * dy) < 24f) {
+                        if (dt < 450L && sqrt(dx * dx + dy * dy) < 9f) {
                             triggerTap()
                         }
                     }
@@ -994,10 +993,8 @@ class KaleidoWallpaperService : WallpaperService() {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
                 if (scaleR > 0.001f) {
-                    // hover parallax chỉ áp khi KHÔNG kéo — tránh làm trôi tâm khi orbit,
-                    // nhưng điểm sáng (uHover) vẫn bật để ngón tay rực lên khi chạm
-                    val hvx = if (hoverActive && !dragging) hoverX * 0.18f else 0f
-                    val hvy = if (hoverActive && !dragging) hoverY * 0.18f else 0f
+                    val hvx = 0f
+                    val hvy = 0f
 
                     // quán tính orbit khi thả tay
                     if (!dragging) {
