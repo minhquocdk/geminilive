@@ -490,7 +490,8 @@ class KaleidoWallpaperService : WallpaperService() {
         private val spZ = FloatArray(G_SPARKS)
         private val spBaseSize = FloatArray(G_SPARKS)
         private var activeSparks = 2000
-        private val sparkCPU = FloatArray(G_SPARKS * 9)   // x,y,z, r,g,b, size,alpha, sym
+        // Layout 10 float / spark: x,y,z,pad, r,g,b, size,alpha,sym
+        private val sparkCPU = FloatArray(G_SPARKS * 10)
 
         private val baseColorArr = FloatArray(3)
         private val coreColorArr = FloatArray(3)
@@ -821,8 +822,8 @@ class KaleidoWallpaperService : WallpaperService() {
                     val dx = bx - ax; val dy = by - ay
                     val segLen = sqrt(dx*dx + dy*dy).coerceAtLeast(1e-4f)
                     val f = ((t - cum) / segLen).coerceIn(0f, 1f)
-                    x = ax + dx * f * G_R * 10
-                    y = ay + dy * f * G_R * 10
+                    x = ax + dx * f
+                    y = ay + dy * f
 
                     // jitter
                     val ja = Random.nextFloat() * (2f * PI).toFloat()
@@ -865,7 +866,7 @@ class KaleidoWallpaperService : WallpaperService() {
                 spSpin[i]  = (Random.nextFloat() - 0.5f) * sp.sparkSpin
                 spZ[i]     = (Random.nextFloat() - 0.5f) * sp.sparkZ
                 spBaseSize[i] = 2.0f + Random.nextFloat() * 4.5f
-                sparkCPU[i * 9 + 8] = Random.nextInt(glyphCount.coerceAtLeast(1)).toFloat()
+                sparkCPU[i * 10 + 9] = Random.nextInt(glyphCount.coerceAtLeast(1)).toFloat()
             }
         }
 
@@ -883,7 +884,11 @@ class KaleidoWallpaperService : WallpaperService() {
             syms = syms.take(32)
             val count = syms.size
             val cellW = 64
-            val bmpW = 32 * cellW
+            // Atlas width must match the number of glyphs actually drawn, otherwise the
+            // fragment shader (which divides by uSymCount = count) samples beyond the
+            // glyph's real region and the point sprite renders at a fraction of its
+            // intended size (glyphs appear tiny).
+            val bmpW = count * cellW
             val bmp = Bitmap.createBitmap(bmpW, 64, Bitmap.Config.ARGB_8888)
             val cv = Canvas(bmp)
             val fm = p.fontMetrics
@@ -1028,13 +1033,13 @@ class KaleidoWallpaperService : WallpaperService() {
                         if (vboSpark == 0) {
                             val ids = IntArray(1); GLES20.glGenBuffers(1, ids, 0); vboSpark = ids[0]
                         }
-                        val sBuf = ByteBuffer.allocateDirect(G_SPARKS * 9 * 4)
+                        val sBuf = ByteBuffer.allocateDirect(G_SPARKS * 10 * 4)
                             .order(ByteOrder.nativeOrder()).asFloatBuffer()
                         sBuf.put(sparkCPU); sBuf.position(0)
                         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboSpark)
-                        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_SPARKS * 9 * 4, sBuf, GLES20.GL_DYNAMIC_DRAW)
+                        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, G_SPARKS * 10 * 4, sBuf, GLES20.GL_DYNAMIC_DRAW)
 
-                        val sStride = 9 * 4
+                        val sStride = 10 * 4
                         GLES20.glEnableVertexAttribArray(aPk)
                         GLES20.glVertexAttribPointer(aPk, 4, GLES20.GL_FLOAT, false, sStride, 0)
                         GLES20.glEnableVertexAttribArray(aColk)
@@ -1059,7 +1064,8 @@ class KaleidoWallpaperService : WallpaperService() {
             }
         }
 
-        // Tính toán tàn lửa trên CPU: vị trí, màu, size, alpha đóng gói vào sparkCPU
+        // Tính toán tàn lửa trên CPU: vị trí, màu, size, alpha, sym
+        // Layout 10 float / spark: [0..2]=pos, [3]=pad, [4..6]=rgb, [7]=size, [8]=alpha, [9]=sym
         private fun updateSparks(dt: Float, ease: Float, scaleR: Float) {
             val sp = SPELLS[spellIndex]
             val orbit = sp.sparkOrbit
@@ -1087,11 +1093,9 @@ class KaleidoWallpaperService : WallpaperService() {
                 val x = cos(spAngle[i]) * rr
                 val y = sin(spAngle[i]) * rr
                 val z = spZ[i] * scaleR
-
                 val fade = sin(PI.toFloat() * life)
                 val mixS = life * 0.65f
-
-                val o = i * 9
+                val o = i * 10
                 sparkCPU[o]     = x
                 sparkCPU[o + 1] = y
                 sparkCPU[o + 2] = z
@@ -1101,52 +1105,7 @@ class KaleidoWallpaperService : WallpaperService() {
                 sparkCPU[o + 6] = coreB + (pb - coreB) * mixS
                 sparkCPU[o + 7] = spBaseSize[i] * sizeMul * fade * (0.4f + 0.6f * ease)
                 sparkCPU[o + 8] = 0.85f * fade * ease
-                // sym ở offset 8 đã set, nhưng ta đang dùng offset 8 cho alpha...
-                // sửa: layout mong muốn là x,y,z, r,g,b, size, alpha, sym -> 9 floats
-                // nên đặt lại
-                val sym = sparkCPU[i * 9 + 8]
-                sparkCPU[o + 7] = spBaseSize[i] * sizeMul * fade * (0.4f + 0.6f * ease)
-                sparkCPU[o + 8] = 0.85f * fade * ease
-                // sym bị ghi đè, cần lưu riêng — đưa sym vào vị trí riêng
-                // vậy cấu trúc thật: x,y,z, r,g,b, size, alpha, sym -> 9 float, sym ở [8]
-                // Nhưng ta vừa ghi alpha vào [8]. Cần sửa: sym nằm ở index 8 luôn
-                // => đặt lại sym SAU khi ghi alpha, hoặc lưu sym trước
-                sparkCPU[o + 8] = sym
-                // Ghi alpha vào vị trí riêng: dùng lại index 7 cho size, nhưng không có chỗ cho alpha
-                // Layout cuối: [0..2] pos, [3..5] rgb, [6] size, [7] alpha, [8] sym
-                sparkCPU[o + 6] = coreB + (pb - coreB) * mixS
-                // Đặt lại:
-                sparkCPU[o + 6] = coreB + (pb - coreB) * mixS
-            }
-            // NOTE: đoạn trên có lỗi nhỏ về layout, sửa gọn bên dưới
-            fixSparkLayout(ease, orbit, sizeMul, pr, pg, pb, coreR, coreG, coreB)
-        }
-
-        private fun fixSparkLayout(
-            ease: Float, orbit: Boolean, sizeMul: Float,
-            pr: Float, pg: Float, pb: Float,
-            coreR: Float, coreG: Float, coreB: Float
-        ) {
-            for (i in 0 until activeSparks) {
-                val life = spLife[i]
-                val r = if (orbit) (0.80f + life * 0.45f) else (0.04f + life * 1.24f)
-                val rr = r * G_R
-                val x = cos(spAngle[i]) * rr
-                val y = sin(spAngle[i]) * rr
-                val z = spZ[i]
-                val fade = sin(PI.toFloat() * life)
-                val mixS = life * 0.65f
-                val o = i * 9
-                val sym = sparkCPU[i * 9 + 8]
-                sparkCPU[o]     = x
-                sparkCPU[o + 1] = y
-                sparkCPU[o + 2] = z
-                sparkCPU[o + 3] = 0f
-                sparkCPU[o + 4] = coreR + (pr - coreR) * mixS
-                sparkCPU[o + 5] = coreG + (pg - coreG) * mixS
-                sparkCPU[o + 6] = coreB + (pb - coreB) * mixS
-                sparkCPU[o + 7] = spBaseSize[i] * sizeMul * fade * (0.4f + 0.6f * ease)
-                sparkCPU[o + 8] = sym
+                // [o + 9] = sym, đã set trong respawnAllSparks, giữ nguyên
             }
         }
     }
