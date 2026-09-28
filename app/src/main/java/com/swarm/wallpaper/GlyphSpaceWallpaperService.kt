@@ -63,7 +63,7 @@ private const val K_MODE_COUNT = 9
 private const val K_REF_PHYSICAL_MIN = 1440f
 // Số glyph tối đa của chuẩn 2K (1440x2960 @ dpr 1.4 ≈ 1028x2114 logical,
 // chia 8200 ≈ 265). Luôn nạp đủ số này bất kể màn hình lớn nhỏ.
-private const val K_GLYPH_COUNT_2K = 265
+private const val K_GLYPH_COUNT_2K = 256
 
 // Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
 // shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
