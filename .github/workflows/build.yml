@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # ⚠️ BẮT BUỘC: Cấp quyền cho Action tạo Release
     steps:
       - uses: actions/checkout@v4
 
@@ -20,12 +22,12 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      # ---- BƯỚC THÊM MỚI: Giải mã file JKS từ GitHub Secrets ----
+      # 1. Giải mã file JKS từ GitHub Secrets
       - name: Decode Keystore
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > app/release.jks
 
-      # ---- SỬA ĐỔI: Chuyển từ assembleDebug sang assembleRelease ----
+      # 2. Chuyển sang build release
       - name: Build release APK
         env:
           SIGNING_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -52,9 +54,13 @@ jobs:
           path: build.log
           if-no-files-found: warn
 
-      # ---- SỬA ĐỔI: Upload file APK Release thay vì bản Debug ----
-      - uses: actions/upload-artifact@v4
+      # 3. TỰ ĐỘNG TẠO RELEASE VÀ UP FILE APK LÊN (THÊM MỚI)
+      - name: Create GitHub Release
         if: success()
+        uses: softprops/action-gh-release@v2
         with:
-          name: SwarmWallpaper-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          tag_name: v1.0.${{ github.run_number }} # Tự động tạo số phiên bản tăng dần theo mỗi lần build
+          name: Release v1.0.${{ github.run_number }}
+          draft: false
+          prerelease: false
+          files: app/build/outputs/apk/release/app-release.apk # Đường dẫn file APK để đính kèm vào Release
