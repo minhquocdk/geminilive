@@ -58,6 +58,12 @@ private const val K_TILT_Y_PER_DEG = 1.00f
 private const val K_TILT_LIMIT_DEG = 35f
 private const val K_SENSOR_STILL_EPS_DEG = 0.20f
 private const val K_MODE_COUNT = 9
+// Chuẩn hoá kích thước glyph về màn 2K (1440px cạnh ngắn physical): trên mọi
+// màn hình, tỉ lệ (glyph physical px / cạnh ngắn physical) luôn bằng màn 2K.
+private const val K_REF_PHYSICAL_MIN = 1440f
+// Số glyph tối đa của chuẩn 2K (1440x2960 @ dpr 1.4 ≈ 1028x2114 logical,
+// chia 8200 ≈ 265). Luôn nạp đủ số này bất kể màn hình lớn nhỏ.
+private const val K_GLYPH_COUNT_2K = 265
 
 // Bảng màu palette 4 lớp (kỹ thuật từ Gemini): mỗi lớp có core + accent,
 // shader nội suy giữa hai màu theo bán kính giống uCore/uAccent bên Gemini.
@@ -720,10 +726,8 @@ class GlyphSpaceWallpaperService : WallpaperService() {
             if (!glReady && prog == 0) return
             if (w <= 0 || h <= 0 || vbo == 0) return
 
-            val logicalW = w / dpr
-            val logicalH = h / dpr
-            // Không clamp: máy nào cũng nạp đủ số glyph theo diện tích màn hình.
-            glyphCount = max(1, ((logicalW * logicalH) / 8200f).toInt())
+            // Luôn dùng số glyph tối đa của chuẩn 2K, đồng nhất trên mọi màn hình.
+            glyphCount = K_GLYPH_COUNT_2K
 
             // 8 float / glyph = 32 bytes. Buffer tĩnh: shader tự animate hoàn toàn.
             val buf = ByteBuffer.allocateDirect(glyphCount * 8 * 4)
@@ -795,7 +799,11 @@ class GlyphSpaceWallpaperService : WallpaperService() {
                 GLES20.glUniform1f(locTransitionDur, transitionDurMs / 1000f)
                 GLES20.glUniform2f(locSize, w / dpr, h / dpr)
                 GLES20.glUniform2f(locCamera, cameraX, cameraY)
-                GLES20.glUniform1f(locDpr, dpr)
+                // Giống cách Gemini tính size: point size tỉ lệ nghịch với khoảng
+                // cách (đã có sẵn qua `scale` trong shader) nhân với hệ số chuẩn
+                // hoá về màn 2K, để màn hình nào glyph cũng to đúng như màn 2K.
+                val sizeNorm = min(w, h).toFloat() / K_REF_PHYSICAL_MIN
+                GLES20.glUniform1f(locDpr, dpr * sizeNorm)
                 GLES20.glUniform1f(locFocal, K_FOCAL)
                 GLES20.glUniform3fv(locCore, 4, coreArr, 0)
                 GLES20.glUniform3fv(locAccent, 4, accentArr, 0)
