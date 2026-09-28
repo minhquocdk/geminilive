@@ -40,12 +40,13 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 // ───────────────────────── CẤU HÌNH (chỉnh ở đây) ─────────────────────────
-private const val G_PARTICLES = 18000     // số hạt dựng hình
+private const val G_PARTICLES = 20000     // số hạt dựng hình
 private const val G_SPARKS = 3000         // pool tàn lửa
 private const val G_FPS = 60              // fps bình thường
 private const val G_FPS_SAVER = 20        // fps khi bật Tiết kiệm pin
 private const val G_R = 120f              // bán kính gốc (world units)
 private const val G_HOVER_R = 95f         // bán kính hover parallax
+private const val G_SIZE_BOOST = 1.6f     // nhân kích thước ký tự (giống Gemini)
 private const val G_SYMBOLS = "ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛋᛏᛒᛖᛗᛚᛝᛟᛞᛥᛦᛧᛨᛩᛪ"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×·"
 
@@ -1123,7 +1124,7 @@ class KaleidoWallpaperService : WallpaperService() {
                     GLES20.glUseProgram(progStruct)
                     GLES20.glUniformMatrix4fv(uMV, 1, false, mv, 0)
                     GLES20.glUniformMatrix4fv(uProj, 1, false, proj, 0)
-                    GLES20.glUniform1f(uPRs, pixelRatio)
+                    GLES20.glUniform1f(uPRs, pixelRatio * G_SIZE_BOOST)
                     GLES20.glUniform2fv(uCosSin, 4, cosSin, 0)
                     GLES20.glUniform3fv(uBaseColor, 1, baseColorArr, 0)
                     GLES20.glUniform3fv(uCoreColor, 1, coreColorArr, 0)
