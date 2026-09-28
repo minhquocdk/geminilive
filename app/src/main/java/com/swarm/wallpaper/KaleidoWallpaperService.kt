@@ -492,6 +492,8 @@ class KaleidoWallpaperService : WallpaperService() {
         private val fromP = FloatArray(G_PARTICLES * 9)   // trạng thái đầu khi morph
         private val toP = FloatArray(G_PARTICLES * 9)     // trạng thái đích khi morph
         private var morphT = 1f                            // 0..1, 1 = đã morph xong
+        private val morphCurl = FloatArray(G_PARTICLES)    // biên độ cong ngang
+        private val morphDelay = FloatArray(G_PARTICLES)   // trễ pha 0..0.4
         // tàn lửa
         private val sparkBase = FloatArray(G_SPARKS * 9)  // x,y,z,_,r,g,b,size,alpha, sym (packed differently)
         private val spAngle = FloatArray(G_SPARKS)
@@ -508,6 +510,11 @@ class KaleidoWallpaperService : WallpaperService() {
 
         private val baseColorArr = FloatArray(3)
         private val coreColorArr = FloatArray(3)
+        private val fromBaseColorArr = FloatArray(3)
+        private val fromCoreColorArr = FloatArray(3)
+        private val curBaseColorArr = FloatArray(3)
+        private val curCoreColorArr = FloatArray(3)
+        private var colorLerpT = 1f
 
         private var drawParticles = G_PARTICLES
         private val polyDataCache = HashMap<ShapeDef, PolyData>()
@@ -542,8 +549,11 @@ class KaleidoWallpaperService : WallpaperService() {
 
         private fun applyPreset(i: Int) {
             presetIndex = i
+            System.arraycopy(baseColorArr, 0, fromBaseColorArr, 0, 3)
+            System.arraycopy(coreColorArr, 0, fromCoreColorArr, 0, 3)
             hexToRgb(PRESETS[i].hex, baseColorArr)
             hexToRgb(PRESETS[i].core, coreColorArr)
+            colorLerpT = 0f
         }
 
         private fun getPolyData(P: ShapeDef): PolyData {
@@ -965,6 +975,14 @@ class KaleidoWallpaperService : WallpaperService() {
             if (morph) {
                 // giữ trạng thái hiện tại làm điểm bắt đầu, để drawFrame lerp dần sang toP
                 System.arraycopy(baseP, 0, fromP, 0, drawParticles * 9)
+                for (i in 0 until drawParticles) {
+                    val o = i * 9
+                    val dx = toP[o] - fromP[o]
+                    val dy = toP[o + 1] - fromP[o + 1]
+                    val len = sqrt(dx * dx + dy * dy)
+                    morphCurl[i]  = (rnd.nextFloat() - 0.5f) * 1.1f * len
+                    morphDelay[i] = rnd.nextFloat() * 0.4f
+                }
                 morphT = 0f
             } else {
                 System.arraycopy(toP, 0, baseP, 0, drawParticles * 9)
@@ -1080,16 +1098,44 @@ class KaleidoWallpaperService : WallpaperService() {
                 if (reveal < 1f) reveal = (reveal + dt * 0.85f).coerceAtMost(1f)
                 val ease = reveal * reveal * (3f - 2f * reveal)
 
-                // morph khi lắc đổi phép
+                // morph khi lắc đổi phép — curl + stagger
                 if (morphT < 1f) {
                     morphT = (morphT + dt * G_MORPH_SPEED).coerceAtMost(1f)
                     val mt = morphT
-                    val me = mt * mt * (3f - 2f * mt)
-                    val n = drawParticles * 9
-                    for (i in 0 until n) {
-                        baseP[i] = fromP[i] + (toP[i] - fromP[i]) * me
+                    val piF = PI.toFloat()
+                    for (i in 0 until drawParticles) {
+                        val o = i * 9
+                        val local = ((mt - morphDelay[i]) / (1f - morphDelay[i])).coerceIn(0f, 1f)
+                        val me = local * local * (3f - 2f * local)
+
+                        val dx = toP[o] - fromP[o]
+                        val dy = toP[o + 1] - fromP[o + 1]
+                        val len = sqrt(dx * dx + dy * dy).coerceAtLeast(1e-3f)
+                        val px = -dy / len
+                        val py =  dx / len
+                        val off = morphCurl[i] * sin(piF * me)
+
+                        baseP[o]     = fromP[o]     + dx * me + px * off
+                        baseP[o + 1] = fromP[o + 1] + dy * me + py * off
+                        baseP[o + 2] = fromP[o + 2] + (toP[o + 2] - fromP[o + 2]) * me
+                        baseP[o + 3] = if (me < 0.5f) fromP[o + 3] else toP[o + 3]
+                        baseP[o + 4] = fromP[o + 4] + (toP[o + 4] - fromP[o + 4]) * me
+                        baseP[o + 5] = fromP[o + 5] + (toP[o + 5] - fromP[o + 5]) * me
+                        baseP[o + 6] = fromP[o + 6] + (toP[o + 6] - fromP[o + 6]) * me
+                        baseP[o + 7] = fromP[o + 7] + (toP[o + 7] - fromP[o + 7]) * me
+                        baseP[o + 8] = if (me < 0.5f) fromP[o + 8] else toP[o + 8]
                     }
                     uploadBase()
+                }
+
+                // lerp màu preset theo morph
+                if (colorLerpT < 1f) {
+                    colorLerpT = (colorLerpT + dt * G_MORPH_SPEED).coerceAtMost(1f)
+                }
+                val ct = colorLerpT * colorLerpT * (3f - 2f * colorLerpT)
+                for (k in 0 until 3) {
+                    curBaseColorArr[k] = fromBaseColorArr[k] + (baseColorArr[k] - fromBaseColorArr[k]) * ct
+                    curCoreColorArr[k] = fromCoreColorArr[k] + (coreColorArr[k] - fromCoreColorArr[k]) * ct
                 }
                 val breathe = 1f + 0.015f * sin(animTime * 1.6f)
                 val scaleR = ease * breathe
@@ -1154,8 +1200,8 @@ class KaleidoWallpaperService : WallpaperService() {
                     GLES20.glUniformMatrix4fv(uProj, 1, false, proj, 0)
                     GLES20.glUniform1f(uPRs, pixelRatio * G_SIZE_BOOST)
                     GLES20.glUniform2fv(uCosSin, 4, cosSin, 0)
-                    GLES20.glUniform3fv(uBaseColor, 1, baseColorArr, 0)
-                    GLES20.glUniform3fv(uCoreColor, 1, coreColorArr, 0)
+                    GLES20.glUniform3fv(uBaseColor, 1, curBaseColorArr, 0)
+                    GLES20.glUniform3fv(uCoreColor, 1, curCoreColorArr, 0)
                     GLES20.glUniform1f(uScale, 1f)
                     GLES20.glUniform3f(uHover, hoverX, hoverY, hoverFlag)
                     GLES20.glUniform1f(uHoverR2, G_HOVER_R * G_HOVER_R)
@@ -1225,8 +1271,8 @@ class KaleidoWallpaperService : WallpaperService() {
             val sp = SPELLS[spellIndex]
             val orbit = sp.sparkOrbit
             val sizeMul = sp.sparkSize
-            val pr = baseColorArr[0]; val pg = baseColorArr[1]; val pb = baseColorArr[2]
-            val cr = coreColorArr[0]; val cg = coreColorArr[1]; val cb = coreColorArr[2]
+            val pr = curBaseColorArr[0]; val pg = curBaseColorArr[1]; val pb = curBaseColorArr[2]
+            val cr = curCoreColorArr[0]; val cg = curCoreColorArr[1]; val cb = curCoreColorArr[2]
             val coreR = cr * 0.55f + 0.45f
             val coreG = cg * 0.55f + 0.45f
             val coreB = cb * 0.55f + 0.45f
