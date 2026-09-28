@@ -47,6 +47,7 @@ private const val G_FPS_SAVER = 20        // fps khi bật Tiết kiệm pin
 private const val G_R = 120f              // bán kính gốc (world units)
 private const val G_HOVER_R = 95f         // bán kính hover parallax
 private const val G_SIZE_BOOST = 1.6f     // nhân kích thước ký tự (giống Gemini)
+private const val G_MORPH_SPEED = 1.8f    // tốc độ morph khi lắc đổi phép
 private const val G_SYMBOLS = "ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛋᛏᛒᛖᛗᛚᛝᛟᛞᛥᛦᛧᛨᛩᛪ"
 private const val G_SYMBOLS_FALLBACK = "✦✧◆◇○△□+×·"
 
@@ -488,6 +489,9 @@ class KaleidoWallpaperService : WallpaperService() {
 
         // hạt dựng hình
         private val baseP = FloatArray(G_PARTICLES * 9)   // x,y,z,layer, radius,mix,size,alpha, sym
+        private val fromP = FloatArray(G_PARTICLES * 9)   // trạng thái đầu khi morph
+        private val toP = FloatArray(G_PARTICLES * 9)     // trạng thái đích khi morph
+        private var morphT = 1f                            // 0..1, 1 = đã morph xong
         // tàn lửa
         private val sparkBase = FloatArray(G_SPARKS * 9)  // x,y,z,_,r,g,b,size,alpha, sym (packed differently)
         private val spAngle = FloatArray(G_SPARKS)
@@ -655,11 +659,12 @@ class KaleidoWallpaperService : WallpaperService() {
             val now = SystemClock.uptimeMillis()
             if (m > 12f && now - lastShakeAt > 900L) {
                 lastShakeAt = now
-                spellIndex = (spellIndex + 1) % SPELLS.size
-                rebuildStructure(SPELLS[spellIndex].shapes)
+                // lắc phải (dx > 0) → tới, lắc trái (dx < 0) → lui
+                val forward = dx > 0f
+                spellIndex = if (forward) (spellIndex + 1) % SPELLS.size
+                             else (spellIndex - 1 + SPELLS.size) % SPELLS.size
+                rebuildStructure(SPELLS[spellIndex].shapes, morph = true)
                 applyPreset(SPELLS[spellIndex].preset)
-                reveal = 0f
-                angles[0] = 0f; angles[1] = 0f; angles[2] = 0f; angles[3] = 0f
                 waves.clear()
                 respawnAllSparks(true)
             }
@@ -887,7 +892,7 @@ class KaleidoWallpaperService : WallpaperService() {
             GLES20.glDisableVertexAttribArray(aSymk)
         }
 
-        private fun rebuildStructure(shapes: List<ShapeDef>) {
+        private fun rebuildStructure(shapes: List<ShapeDef>, morph: Boolean = false) {
             val symCount = glyphCount
             // tổng trọng số
             var weightSum = 0f
@@ -946,18 +951,29 @@ class KaleidoWallpaperService : WallpaperService() {
                 val rad = sqrt(x * x + y * y)
                 val mix = Math.pow((1f - rad / G_R).coerceAtLeast(0f).toDouble(), 1.5).toFloat()
 
-                baseP[o]     = x
-                baseP[o + 1] = y
-                baseP[o + 2] = z
-                baseP[o + 3] = P.layer.toFloat()
-                baseP[o + 4] = rad
-                baseP[o + 5] = mix
-                baseP[o + 6] = P.size * (0.70f + rnd.nextFloat() * 0.60f)
-                baseP[o + 7] = P.alpha * (0.65f + rnd.nextFloat() * 0.70f)
-                baseP[o + 8] = rnd.nextInt(symCount).toFloat()
+                toP[o]     = x
+                toP[o + 1] = y
+                toP[o + 2] = z
+                toP[o + 3] = P.layer.toFloat()
+                toP[o + 4] = rad
+                toP[o + 5] = mix
+                toP[o + 6] = P.size * (0.70f + rnd.nextFloat() * 0.60f)
+                toP[o + 7] = P.alpha * (0.65f + rnd.nextFloat() * 0.70f)
+                toP[o + 8] = rnd.nextInt(symCount).toFloat()
             }
 
-            // nạp lên VBO
+            if (morph) {
+                // giữ trạng thái hiện tại làm điểm bắt đầu, để drawFrame lerp dần sang toP
+                System.arraycopy(baseP, 0, fromP, 0, drawParticles * 9)
+                morphT = 0f
+            } else {
+                System.arraycopy(toP, 0, baseP, 0, drawParticles * 9)
+                morphT = 1f
+                uploadBase()
+            }
+        }
+
+        private fun uploadBase() {
             val buf = ByteBuffer.allocateDirect(drawParticles * 9 * 4)
                 .order(ByteOrder.nativeOrder()).asFloatBuffer()
             buf.put(baseP, 0, drawParticles * 9)
@@ -966,7 +982,7 @@ class KaleidoWallpaperService : WallpaperService() {
                 val ids = IntArray(1); GLES20.glGenBuffers(1, ids, 0); vboStruct = ids[0]
             }
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboStruct)
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, drawParticles * 9 * 4, buf, GLES20.GL_STATIC_DRAW)
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, drawParticles * 9 * 4, buf, GLES20.GL_DYNAMIC_DRAW)
             setupStructAttribs()
         }
 
@@ -1063,6 +1079,18 @@ class KaleidoWallpaperService : WallpaperService() {
                 // reveal
                 if (reveal < 1f) reveal = (reveal + dt * 0.85f).coerceAtMost(1f)
                 val ease = reveal * reveal * (3f - 2f * reveal)
+
+                // morph khi lắc đổi phép
+                if (morphT < 1f) {
+                    morphT = (morphT + dt * G_MORPH_SPEED).coerceAtMost(1f)
+                    val mt = morphT
+                    val me = mt * mt * (3f - 2f * mt)
+                    val n = drawParticles * 9
+                    for (i in 0 until n) {
+                        baseP[i] = fromP[i] + (toP[i] - fromP[i]) * me
+                    }
+                    uploadBase()
+                }
                 val breathe = 1f + 0.015f * sin(animTime * 1.6f)
                 val scaleR = ease * breathe
 
